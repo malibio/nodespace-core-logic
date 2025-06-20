@@ -26,20 +26,16 @@ This repository implements the business logic layer that orchestrates all NodeSp
 - **`nodespace-nlp-engine`** - AI processing and embedding generation
 - **`nodespace-workflow-engine`** - Event processing and automation
 
-## 🏗️ Architecture Context
-
-Part of the [NodeSpace system architecture](https://github.com/malibio/nodespace-system-design):
-
-1. `nodespace-core-types` - Shared data structures and interfaces
-2. `nodespace-data-store` - Database and vector storage
-3. `nodespace-nlp-engine` - AI/ML processing and LLM integration
-4. `nodespace-workflow-engine` - Automation and event processing
-5. **`nodespace-core-logic`** ← **You are here**
-6. `nodespace-core-ui` - React components and UI
-7. `nodespace-desktop-app` - Tauri application shell
-
 ## 🚀 Getting Started
 
+### **New to NodeSpace? Start Here:**
+1. **Read [NodeSpace System Design](../nodespace-system-design/README.md)** - Understand the full architecture
+2. **Check [Linear workspace](https://linear.app/nodespace)** - Find your current tasks (filter by `nodespace-core-logic`)
+3. **Review [Development Workflow](../nodespace-system-design/docs/development-workflow.md)** - Process and procedures
+4. **Study [Key Contracts](../nodespace-system-design/contracts/)** - Interface definitions you'll implement
+5. **See [MVP User Flow](../nodespace-system-design/examples/mvp-user-flow.md)** - What you're building
+
+### **Development Setup:**
 ```bash
 # Add to your Cargo.toml
 [dependencies]
@@ -51,6 +47,18 @@ use nodespace_core_logic::NodeSpaceService;
 let service = NodeSpaceService::new().await?;
 let response = service.process_rag_query(query).await?;
 ```
+
+## 🏗️ Architecture Context
+
+Part of the [NodeSpace system architecture](../nodespace-system-design/README.md):
+
+1. `nodespace-core-types` - Shared data structures and interfaces
+2. `nodespace-data-store` - Database and vector storage
+3. `nodespace-nlp-engine` - AI/ML processing and LLM integration
+4. `nodespace-workflow-engine` - Automation and event processing
+5. **`nodespace-core-logic`** ← **You are here**
+6. `nodespace-core-ui` - React components and UI
+7. `nodespace-desktop-app` - Tauri application shell
 
 ## 🔄 MVP Implementation
 
@@ -75,15 +83,6 @@ cargo run --example mvp_workflow
 cargo test --test integration
 ```
 
-## 📋 Development Status
-
-- [ ] Implement service orchestration layer
-- [ ] Build complete MVP RAG pipeline
-- [ ] Add comprehensive error handling
-- [ ] Implement transaction management
-- [ ] Add integration test suite
-- [ ] Performance optimization and monitoring
-
 ---
 
-**Project Management:** All tasks tracked in [NodeSpace Project](https://github.com/users/malibio/projects/4)
+**Project Management:** All development tasks tracked in [Linear workspace](https://linear.app/nodespace)
