@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::NaiveDate;
 use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
 use nodespace_data_store::DataStore;
 use nodespace_nlp_engine::NLPEngine;
@@ -224,6 +225,34 @@ pub trait CoreLogic: Send + Sync {
     async fn generate_insights(&self, node_ids: Vec<NodeId>) -> NodeSpaceResult<String>;
 }
 
+/// Date navigation operations for hierarchical date-based content organization
+#[async_trait]
+pub trait DateNavigation: Send + Sync {
+    /// Get all text nodes for a specific date
+    async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Switch to viewing a specific date with navigation context
+    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult>;
+
+    /// Navigate to previous day with content
+    async fn get_previous_day(&self, current_date: NaiveDate)
+        -> NodeSpaceResult<Option<NaiveDate>>;
+
+    /// Navigate to next day with content
+    async fn get_next_day(&self, current_date: NaiveDate) -> NodeSpaceResult<Option<NaiveDate>>;
+
+    /// Ensure date node exists for organization
+    async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode>;
+
+    /// Get all child nodes of a date node (hierarchical retrieval)
+    async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Get today's date for navigation
+    fn get_today() -> NaiveDate {
+        chrono::Utc::now().date_naive()
+    }
+}
+
 /// Search result with relevance scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -239,6 +268,24 @@ pub struct QueryResponse {
     pub sources: Vec<NodeId>,
     pub confidence: f32,
     pub related_queries: Vec<String>,
+}
+
+/// Navigation result for date operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavigationResult {
+    pub date: NaiveDate,
+    pub nodes: Vec<Node>,
+    pub has_previous: bool,
+    pub has_next: bool,
+}
+
+/// Date node for organizing hierarchical content
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DateNode {
+    pub id: NodeId,
+    pub date: NaiveDate,
+    pub description: Option<String>,
+    pub child_count: usize,
 }
 
 #[async_trait]
@@ -633,5 +680,159 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
         self.data_store
             .create_relationship(from, to, rel_type)
             .await
+    }
+}
+
+/// Date Navigation implementation for NodeSpaceService
+#[async_trait]
+impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
+    for NodeSpaceService<D, N>
+{
+    async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>> {
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        // Query for all text nodes that have the specified date as parent
+        let query = format!(
+            "SELECT * FROM text WHERE parent_node = (SELECT id FROM date WHERE date_value = '{}' LIMIT 1)",
+            date_str
+        );
+
+        let nodes = self.data_store.query_nodes(&query).await?;
+        Ok(nodes)
+    }
+
+    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
+        // Get nodes for the specified date
+        let nodes = self.get_nodes_for_date(date).await?;
+
+        // Check if there's a previous day with content
+        let has_previous = (self.get_previous_day(date).await?).is_some();
+
+        // Check if there's a next day with content
+        let has_next = (self.get_next_day(date).await?).is_some();
+
+        Ok(NavigationResult {
+            date,
+            nodes,
+            has_previous,
+            has_next,
+        })
+    }
+
+    async fn get_previous_day(
+        &self,
+        current_date: NaiveDate,
+    ) -> NodeSpaceResult<Option<NaiveDate>> {
+        let current_str = current_date.format("%Y-%m-%d").to_string();
+
+        // Find the latest date before the current date that has content
+        let query = format!(
+            "SELECT date_value FROM date WHERE date_value < '{}' AND id IN (SELECT DISTINCT parent_node FROM text) ORDER BY date_value DESC LIMIT 1",
+            current_str
+        );
+
+        let result_nodes = self.data_store.query_nodes(&query).await?;
+
+        if let Some(node) = result_nodes.first() {
+            if let Some(date_str) = node.content.as_str() {
+                if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    return Ok(Some(parsed_date));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn get_next_day(&self, current_date: NaiveDate) -> NodeSpaceResult<Option<NaiveDate>> {
+        let current_str = current_date.format("%Y-%m-%d").to_string();
+
+        // Find the earliest date after the current date that has content
+        let query = format!(
+            "SELECT date_value FROM date WHERE date_value > '{}' AND id IN (SELECT DISTINCT parent_node FROM text) ORDER BY date_value ASC LIMIT 1",
+            current_str
+        );
+
+        let result_nodes = self.data_store.query_nodes(&query).await?;
+
+        if let Some(node) = result_nodes.first() {
+            if let Some(date_str) = node.content.as_str() {
+                if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    return Ok(Some(parsed_date));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode> {
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        // First, try to find existing date node
+        let query = format!("SELECT * FROM date WHERE date_value = '{}'", date_str);
+        let existing_nodes = self.data_store.query_nodes(&query).await?;
+
+        if let Some(existing_node) = existing_nodes.first() {
+            // Get child count
+            let count_query = format!(
+                "SELECT COUNT() AS count FROM text WHERE parent_node = '{}'",
+                existing_node.id
+            );
+            let count_result = self.data_store.query_nodes(&count_query).await?;
+            let child_count = count_result
+                .first()
+                .and_then(|n| n.content.as_u64())
+                .unwrap_or(0) as usize;
+
+            return Ok(DateNode {
+                id: existing_node.id.clone(),
+                date,
+                description: existing_node
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("description"))
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string()),
+                child_count,
+            });
+        }
+
+        // Create new date node if it doesn't exist
+        let node_id = NodeId::new();
+        let now = chrono::Utc::now().to_rfc3339();
+        let description = format!("{}", date.format("%A, %B %d, %Y"));
+
+        let date_node = Node {
+            id: node_id.clone(),
+            content: serde_json::Value::String(date_str),
+            metadata: Some(serde_json::json!({
+                "description": description,
+                "node_type": "date"
+            })),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        // Store the date node
+        self.data_store.store_node(date_node).await?;
+
+        Ok(DateNode {
+            id: node_id,
+            date,
+            description: Some(description),
+            child_count: 0,
+        })
+    }
+
+    async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Query for all nodes that have this date node as their parent
+        let query = format!(
+            "SELECT * FROM text WHERE parent_node = '{}' ORDER BY created_at ASC",
+            date_node_id
+        );
+
+        let children = self.data_store.query_nodes(&query).await?;
+        Ok(children)
     }
 }
