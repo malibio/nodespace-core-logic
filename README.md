@@ -1,3 +1,10 @@
+# ⚠️ BEFORE STARTING ANY WORK
+👉 **STEP 1**: Read development workflow: `../nodespace-system-design/docs/development-workflow.md`
+👉 **STEP 2**: Check Linear for assigned tasks
+👉 **STEP 3**: Repository-specific patterns below
+
+**This README.md only contains**: Repository-specific Rust business logic patterns
+
 # NodeSpace Core Logic
 
 **Business logic and service orchestration for NodeSpace**
@@ -21,19 +28,25 @@ This repository implements the business logic layer that orchestrates all NodeSp
 
 ## 🔗 Dependencies
 
-- **`nodespace-core-types`** - Data structures and service interfaces
-- **`nodespace-data-store`** - Node storage and search capabilities
-- **`nodespace-nlp-engine`** - AI processing and embedding generation
-- **`nodespace-workflow-engine`** - Event processing and automation
+- **`nodespace-core-types`** - Shared data structures (NodeId, Node, NodeSpaceResult)
+- **`nodespace-data-store`** - Imports `DataStore` trait, node storage and search
+- **`nodespace-nlp-engine`** - Imports `NLPEngine` trait, AI processing and embeddings
+- **`nodespace-workflow-engine`** - Imports `WorkflowEngine` trait, event processing
+
+## 🏗️ Distributed Architecture Role
+
+This repository **orchestrates services** using NodeSpace's distributed contract architecture:
+- **Imports service traits**: DataStore, NLPEngine, WorkflowEngine from their respective repositories
+- **Provides coordination**: High-level business logic that coordinates multiple services
+- **MVP implementation**: Complete RAG workflow (text storage → embedding → search → AI response)
 
 ## 🚀 Getting Started
 
 ### **New to NodeSpace? Start Here:**
-1. **Read [NodeSpace System Design](../nodespace-system-design/README.md)** - Understand the full architecture
-2. **Check [Linear workspace](https://linear.app/nodespace)** - Find your current tasks (filter by `nodespace-core-logic`)
-3. **Review [Development Workflow](../nodespace-system-design/docs/development-workflow.md)** - Process and procedures
-4. **Study [Key Contracts](../nodespace-system-design/contracts/)** - Interface definitions you'll implement
-5. **See [MVP User Flow](../nodespace-system-design/examples/mvp-user-flow.md)** - What you're building
+1. **📖 System Context**: Read [NodeSpace System Design](../nodespace-system-design) for complete architecture
+2. **📋 Current Work**: Check [Linear workspace](https://linear.app/nodespace) for tasks (filter: `nodespace-core-logic`)
+3. **🤖 Development**: See [CLAUDE.md](./CLAUDE.md) for autonomous development workflow
+4. **🎯 MVP Goal**: Orchestrate complete RAG workflow across all services
 
 ### **Development Setup:**
 ```bash
