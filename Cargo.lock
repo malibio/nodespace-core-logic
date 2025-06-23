@@ -3931,6 +3931,7 @@ name = "nodespace-data-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "nodespace-core-types",
  "serde",
  "serde_json",
