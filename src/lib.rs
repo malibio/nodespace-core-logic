@@ -575,6 +575,112 @@ impl CoreLogic for ServiceContainer {
 
         Ok(insights)
     }
+
+    async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Retrieve node from data store
+        self.data_store.get_node(node_id).await
+    }
+
+    async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Query for all nodes that have this node as their parent
+        let query = format!(
+            "SELECT * FROM text WHERE parent_node = '{}' ORDER BY created_at ASC",
+            parent_id
+        );
+
+        let children = self.data_store.query_nodes(&query).await?;
+        Ok(children)
+    }
+
+    async fn get_parent(&self, node_id: &NodeId) -> NodeSpaceResult<Option<NodeId>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Get the node and extract parent_id from metadata
+        let node = self.data_store.get_node(node_id).await?;
+
+        match node {
+            Some(n) => {
+                // Extract parent_id from node metadata
+                if let Some(metadata) = &n.metadata {
+                    if let Some(parent_id_value) = metadata.get("parent_node") {
+                        if let Some(parent_id_str) = parent_id_value.as_str() {
+                            return Ok(Some(NodeId::from_string(parent_id_str.to_string())));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn set_parent(
+        &self,
+        child_id: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Get the child node
+        let mut child_node = self.data_store.get_node(child_id).await?.ok_or_else(|| {
+            NodeSpaceError::NotFound(format!("Child node {} not found", child_id))
+        })?;
+
+        // Update the parent_node field in metadata
+        let mut metadata = child_node.metadata.unwrap_or_else(|| serde_json::json!({}));
+
+        match parent_id {
+            Some(parent) => {
+                // Set the parent
+                metadata["parent_node"] = serde_json::Value::String(parent.as_str().to_string());
+            }
+            None => {
+                // Remove the parent
+                if let Some(metadata_obj) = metadata.as_object_mut() {
+                    metadata_obj.remove("parent_node");
+                }
+            }
+        }
+
+        child_node.metadata = Some(metadata);
+        child_node.updated_at = chrono::Utc::now().to_rfc3339();
+
+        // Store the updated node
+        self.data_store.store_node(child_node).await?;
+        Ok(())
+    }
 }
 
 // Implement DateNavigation trait for ServiceContainer
@@ -761,6 +867,22 @@ pub trait CoreLogic: Send + Sync {
 
     /// Generate insights from a collection of nodes
     async fn generate_insights(&self, node_ids: Vec<NodeId>) -> NodeSpaceResult<String>;
+
+    /// Retrieve a node by ID
+    async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>>;
+
+    /// Get child nodes of a parent node (supports lazy loading)
+    async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Get parent node ID of a child node
+    async fn get_parent(&self, node_id: &NodeId) -> NodeSpaceResult<Option<NodeId>>;
+
+    /// Set parent-child relationship (None parent_id removes parent)
+    async fn set_parent(
+        &self,
+        child_id: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()>;
 }
 
 /// Date navigation operations for hierarchical date-based content organization
@@ -1132,6 +1254,112 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let insights = self.nlp_engine.generate_text(&prompt).await?;
 
         Ok(insights)
+    }
+
+    async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Retrieve node from data store
+        self.data_store.get_node(node_id).await
+    }
+
+    async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Query for all nodes that have this node as their parent
+        let query = format!(
+            "SELECT * FROM text WHERE parent_node = '{}' ORDER BY created_at ASC",
+            parent_id
+        );
+
+        let children = self.data_store.query_nodes(&query).await?;
+        Ok(children)
+    }
+
+    async fn get_parent(&self, node_id: &NodeId) -> NodeSpaceResult<Option<NodeId>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Get the node and extract parent_id from metadata
+        let node = self.data_store.get_node(node_id).await?;
+
+        match node {
+            Some(n) => {
+                // Extract parent_id from node metadata
+                if let Some(metadata) = &n.metadata {
+                    if let Some(parent_id_value) = metadata.get("parent_node") {
+                        if let Some(parent_id_str) = parent_id_value.as_str() {
+                            return Ok(Some(NodeId::from_string(parent_id_str.to_string())));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn set_parent(
+        &self,
+        child_id: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Get the child node
+        let mut child_node = self.data_store.get_node(child_id).await?.ok_or_else(|| {
+            NodeSpaceError::NotFound(format!("Child node {} not found", child_id))
+        })?;
+
+        // Update the parent_node field in metadata
+        let mut metadata = child_node.metadata.unwrap_or_else(|| serde_json::json!({}));
+
+        match parent_id {
+            Some(parent) => {
+                // Set the parent
+                metadata["parent_node"] = serde_json::Value::String(parent.as_str().to_string());
+            }
+            None => {
+                // Remove the parent
+                if let Some(metadata_obj) = metadata.as_object_mut() {
+                    metadata_obj.remove("parent_node");
+                }
+            }
+        }
+
+        child_node.metadata = Some(metadata);
+        child_node.updated_at = chrono::Utc::now().to_rfc3339();
+
+        // Store the updated node
+        self.data_store.store_node(child_node).await?;
+        Ok(())
     }
 }
 
