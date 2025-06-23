@@ -1,5 +1,20 @@
 # CLAUDE.md
 
+🚨 **STOP - READ WORKFLOW FIRST** 🚨
+Before doing ANYTHING else, you MUST read the development workflow:
+1. Read: `../nodespace-system-design/docs/development-workflow.md`
+2. Check Linear for current tasks
+3. Then return here for implementation guidance
+
+❌ **FORBIDDEN:** Any code analysis, planning, or implementation before reading the workflow
+
+## Development Workflow
+**ALWAYS start with README.md** - This file contains the authoritative development workflow and setup instructions for this repository.
+
+**Then return here** for repository-specific guidance and architecture details.
+
+## Project Overview
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -8,15 +23,18 @@ This is the **business logic orchestration layer** for NodeSpace - a Rust-based 
 
 **Current Status**: Planning phase complete, awaiting implementation.
 
+## 🎯 FINDING YOUR NEXT TASK
+
+**See [development-workflow.md](../nodespace-system-design/docs/development-workflow.md)** for task management workflow.
+
 ## Essential Onboarding Process
 
 **Follow the README.md onboarding steps exactly**:
 
 1. **Read [NodeSpace System Design](../nodespace-system-design/README.md)** - Understand the full architecture
-2. **Check [Linear workspace](https://linear.app/nodespace)** - Find current tasks (filter by `nodespace-core-logic`)  
-3. **Review [Development Workflow](../nodespace-system-design/docs/development-workflow.md)** - Process and procedures
-4. **Study [Key Contracts](../nodespace-system-design/contracts/)** - Interface definitions to implement
-5. **See [MVP User Flow](../nodespace-system-design/examples/mvp-user-flow.md)** - Implementation examples
+2. **Review [Development Workflow](../nodespace-system-design/docs/development-workflow.md)** - Process and procedures
+3. **Study [Key Contracts](../nodespace-system-design/contracts/)** - Interface definitions to implement
+4. **See [MVP User Flow](../nodespace-system-design/examples/mvp-user-flow.md)** - Implementation examples
 
 ## Development Commands
 
