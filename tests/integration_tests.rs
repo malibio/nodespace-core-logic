@@ -75,17 +75,21 @@ impl DataStore for MockDataStore {
     ) -> NodeSpaceResult<Vec<(Node, f32)>> {
         let nodes = self.nodes.read().await;
         let mut results = Vec::new();
-        
+
         // Return mock results with decreasing similarity scores
         for (index, node) in nodes.iter().take(limit).enumerate() {
             let score = 1.0 - (index as f32 * 0.1);
             results.push((node.clone(), score.max(0.1)));
         }
-        
+
         Ok(results)
     }
 
-    async fn update_node_embedding(&self, _id: &NodeId, _embedding: Vec<f32>) -> NodeSpaceResult<()> {
+    async fn update_node_embedding(
+        &self,
+        _id: &NodeId,
+        _embedding: Vec<f32>,
+    ) -> NodeSpaceResult<()> {
         // For mock, this is a no-op since we don't actually store embeddings
         Ok(())
     }
@@ -134,7 +138,7 @@ async fn test_create_knowledge_node() {
     let data_store = MockDataStore::new();
     let nlp_engine = MockNLPEngine;
     let service = NodeSpaceService::new(data_store, nlp_engine);
-    
+
     // Initialize the service
     service.initialize().await.unwrap();
 
@@ -152,7 +156,7 @@ async fn test_semantic_search() {
     let data_store = MockDataStore::new();
     let nlp_engine = MockNLPEngine;
     let service = NodeSpaceService::new(data_store.clone(), nlp_engine);
-    
+
     // Initialize the service
     service.initialize().await.unwrap();
 
@@ -179,7 +183,7 @@ async fn test_process_query() {
     let data_store = MockDataStore::new();
     let nlp_engine = MockNLPEngine;
     let service = NodeSpaceService::new(data_store.clone(), nlp_engine);
-    
+
     // Initialize the service
     service.initialize().await.unwrap();
 
@@ -203,7 +207,7 @@ async fn test_update_node() {
     let data_store = MockDataStore::new();
     let nlp_engine = MockNLPEngine;
     let service = NodeSpaceService::new(data_store.clone(), nlp_engine);
-    
+
     // Initialize the service
     service.initialize().await.unwrap();
 
@@ -225,7 +229,7 @@ async fn test_get_related_nodes() {
     let data_store = MockDataStore::new();
     let nlp_engine = MockNLPEngine;
     let service = NodeSpaceService::new(data_store, nlp_engine);
-    
+
     // Initialize the service
     service.initialize().await.unwrap();
 
@@ -251,7 +255,7 @@ async fn test_generate_insights() {
     let data_store = MockDataStore::new();
     let nlp_engine = MockNLPEngine;
     let service = NodeSpaceService::new(data_store.clone(), nlp_engine);
-    
+
     // Initialize the service
     service.initialize().await.unwrap();
 
