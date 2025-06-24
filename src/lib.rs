@@ -534,8 +534,8 @@ impl CoreLogic for ServiceContainer {
         // Generate query embedding
         let query_embedding = self.nlp_engine.generate_embedding(query).await?;
 
-        // Perform vector similarity search using the data store's semantic search method
-        let results = self.data_store.semantic_search_with_embedding(query_embedding, limit).await?;
+        // Perform vector similarity search using the data store's search method
+        let results = self.data_store.search_similar_nodes(query_embedding, limit).await?;
 
         // Convert to SearchResult format
         let search_results = results
