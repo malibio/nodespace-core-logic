@@ -510,13 +510,8 @@ impl CoreLogic for ServiceContainer {
         let embedding = self.nlp_engine.generate_embedding(content).await?;
 
         // Create node with embedding and metadata
-        let node = Node {
-            id: NodeId::new(),
-            content: serde_json::Value::String(content.to_string()),
-            metadata: Some(serde_json::json!({"parent_date": date})),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        };
+        let node = Node::new(serde_json::Value::String(content.to_string()))
+            .with_metadata(serde_json::json!({"parent_date": date}));
 
         let node_id = node.id.clone();
 
