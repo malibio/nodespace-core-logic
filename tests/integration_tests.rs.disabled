@@ -93,6 +93,15 @@ impl DataStore for MockDataStore {
         // For mock, this is a no-op since we don't actually store embeddings
         Ok(())
     }
+
+    async fn semantic_search_with_embedding(
+        &self,
+        _embedding: Vec<f32>,
+        limit: usize,
+    ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+        // Delegate to search_similar_nodes for mock implementation
+        self.search_similar_nodes(_embedding, limit).await
+    }
 }
 
 /// Mock NLP Engine for testing
