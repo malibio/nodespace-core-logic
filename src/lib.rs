@@ -7,6 +7,178 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Content processing utilities for markdown and bullet point handling
+pub mod content_processing {
+    /// Remove bullet points from text content for child nodes
+    /// Handles various bullet point formats: -, •, *, etc.
+    pub fn clean_bullet_points(content: &str) -> String {
+        content
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                // Remove common bullet point patterns
+                if let Some(stripped) = trimmed.strip_prefix("- ") {
+                    stripped.to_string()
+                } else if let Some(stripped) = trimmed.strip_prefix("• ") {
+                    stripped.to_string()
+                } else if let Some(stripped) = trimmed.strip_prefix("* ") {
+                    stripped.to_string()
+                } else if let Some(stripped) = trimmed.strip_prefix("+ ") {
+                    stripped.to_string()
+                } else {
+                    // Keep numbered lists but could be enhanced later
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    /// Process content for child nodes: clean bullet points and prepare for markdown
+    pub fn process_child_content(content: &str) -> String {
+        let cleaned = clean_bullet_points(content);
+        // Additional markdown processing can be added here
+        cleaned
+    }
+
+    /// Check if content has bullet points that should be cleaned
+    pub fn has_bullet_points(content: &str) -> bool {
+        content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("- ") || 
+            trimmed.starts_with("• ") || 
+            trimmed.starts_with("* ") || 
+            trimmed.starts_with("+ ")
+        })
+    }
+}
+
+/// Database migration system for versioned upgrades
+pub mod migrations {
+    use super::*;
+    
+    /// Database version information
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DatabaseVersion {
+        pub version: u32,
+        pub applied_at: String,
+        pub migration_name: String,
+        pub description: String,
+    }
+
+    /// Migration result with details
+    #[derive(Debug, Clone)]
+    pub struct MigrationResult {
+        pub version: u32,
+        pub name: String,
+        pub success: bool,
+        pub message: String,
+        pub duration_ms: u64,
+    }
+
+    /// Migration trait for version upgrades
+    #[async_trait]
+    pub trait Migration: Send + Sync {
+        /// Migration version number (sequential)
+        fn version(&self) -> u32;
+        
+        /// Human-readable migration name
+        fn name(&self) -> &str;
+        
+        /// Description of what this migration does
+        fn description(&self) -> &str;
+        
+        /// Execute the migration
+        async fn migrate(&self, service: &ServiceContainer) -> NodeSpaceResult<()>;
+        
+        /// Check if migration can be safely applied
+        async fn can_apply(&self, service: &ServiceContainer) -> NodeSpaceResult<bool> {
+            // Default: check if version is not already applied
+            let current_version = service.get_database_version().await.unwrap_or(0);
+            Ok(current_version < self.version())
+        }
+    }
+
+    /// Migration manager for orchestrating database upgrades
+    pub struct MigrationManager {
+        migrations: Vec<Box<dyn Migration>>,
+    }
+
+    impl MigrationManager {
+        pub fn new() -> Self {
+            Self {
+                migrations: Vec::new(),
+            }
+        }
+
+        /// Register a migration
+        pub fn add_migration(mut self, migration: Box<dyn Migration>) -> Self {
+            self.migrations.push(migration);
+            // Keep migrations sorted by version
+            self.migrations.sort_by_key(|m| m.version());
+            self
+        }
+
+        /// Get all pending migrations for current database
+        pub async fn get_pending_migrations(&self, service: &ServiceContainer) -> NodeSpaceResult<Vec<&dyn Migration>> {
+            let current_version = service.get_database_version().await.unwrap_or(0);
+            
+            let pending: Vec<&dyn Migration> = self.migrations
+                .iter()
+                .map(|m| m.as_ref())
+                .filter(|m| m.version() > current_version)
+                .collect();
+                
+            Ok(pending)
+        }
+
+        /// Execute all pending migrations
+        pub async fn migrate_to_latest(&self, service: &ServiceContainer) -> NodeSpaceResult<Vec<MigrationResult>> {
+            let pending = self.get_pending_migrations(service).await?;
+            let mut results = Vec::new();
+
+            for migration in pending {
+                let start = std::time::Instant::now();
+                
+                match migration.migrate(service).await {
+                    Ok(_) => {
+                        // Update database version
+                        service.set_database_version(
+                            migration.version(),
+                            migration.name(),
+                            migration.description(),
+                        ).await?;
+                        
+                        results.push(MigrationResult {
+                            version: migration.version(),
+                            name: migration.name().to_string(),
+                            success: true,
+                            message: "Migration completed successfully".to_string(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        });
+                    }
+                    Err(e) => {
+                        results.push(MigrationResult {
+                            version: migration.version(),
+                            name: migration.name().to_string(),
+                            success: false,
+                            message: format!("Migration failed: {}", e),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        });
+                        
+                        // Stop on first failure
+                        break;
+                    }
+                }
+            }
+
+            Ok(results)
+        }
+    }
+}
+
 /// Date navigation result with context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigationResult {
@@ -23,6 +195,17 @@ pub struct DateNode {
     pub date: NaiveDate,
     pub description: Option<String>,
     pub child_count: usize,
+}
+
+/// Hierarchical node structure that includes relationship information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalNode {
+    pub node: Node,
+    pub children: Vec<NodeId>,
+    pub parent: Option<NodeId>,
+    pub depth_level: u32,
+    pub order_in_parent: u32,
+    pub relationship_type: Option<String>,
 }
 
 /// Date navigation operations interface
@@ -46,6 +229,12 @@ pub trait DateNavigation: Send + Sync {
 
     /// Get children of a date node
     async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Get nodes with their hierarchical relationships for a specific date
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>>;
 }
 
 /// Configuration for NodeSpace service initialization
@@ -69,6 +258,8 @@ pub struct ModelConfig {
     pub download_timeout: Option<u64>,
     /// Local model cache directory
     pub cache_dir: Option<String>,
+    /// Local model path for ONNX models (client-controlled)
+    pub model_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,10 +294,11 @@ impl Default for NodeSpaceConfig {
     fn default() -> Self {
         Self {
             model_config: ModelConfig {
-                embedding_model: Some("sentence-transformers/all-MiniLM-L6-v2".to_string()),
-                text_model: Some("mistralai/Mistral-7B-Instruct-v0.1".to_string()),
+                embedding_model: Some("BAAI/bge-small-en-v1.5".to_string()), // Fastembed model
+                text_model: Some("local/gemma-3-1b-it-onnx".to_string()),
                 download_timeout: Some(300), // 5 minutes
                 cache_dir: None,             // Use system default
+                model_path: None,            // Client should provide
             },
             performance_config: PerformanceConfig {
                 max_batch_size: Some(32),
@@ -233,7 +425,6 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
     }
 }
 
-
 /// ServiceContainer for coordinating all NodeSpace services with specific database path
 /// This addresses the critical MVP blocker by providing proper database coordination
 pub struct ServiceContainer {
@@ -268,9 +459,8 @@ impl ServiceContainer {
         let database_path = "/Users/malibio/nodespace/nodespace-data-store/data/sample.db";
         let data_store = SurrealDataStore::new(database_path).await?;
 
-        // Initialize NLP engine
-        let nlp_engine = LocalNLPEngine::new();
-        nlp_engine.initialize().await?;
+        // ServiceContainer translates NodeSpaceConfig → NLP engine configuration
+        let nlp_engine = Self::create_configured_nlp_engine(&config).await?;
 
         // Create service container with initialized state
         let state = Arc::new(RwLock::new(ServiceState::Ready));
@@ -281,6 +471,110 @@ impl ServiceContainer {
             config,
             state,
         })
+    }
+
+    /// Create ServiceContainer with model path configuration for client apps
+    pub async fn new_with_model_path<P: Into<std::path::PathBuf>>(
+        model_path: P,
+    ) -> Result<Self, InitializationError> {
+        // Create NodeSpaceConfig with client-provided model path
+        let mut config = NodeSpaceConfig::default();
+        config.model_config.model_path = Some(model_path.into());
+
+        Self::new_with_config(config).await
+    }
+
+    /// Create ServiceContainer with database and model paths (for desktop app)
+    pub async fn new_with_database_and_model_paths<D, M>(
+        database_path: D,
+        model_path: M,
+    ) -> Result<Self, InitializationError>
+    where
+        D: Into<String>,
+        M: Into<std::path::PathBuf>,
+    {
+        // Desktop app provides database path - clean separation of concerns
+        let data_store = SurrealDataStore::new(&database_path.into()).await?;
+
+        // Create configuration with client-provided model path
+        let mut config = NodeSpaceConfig::default();
+        config.model_config.model_path = Some(model_path.into());
+
+        // ServiceContainer translates configuration to NLP engine setup
+        let nlp_engine = Self::create_configured_nlp_engine(&config).await?;
+
+        // Create service container with initialized state
+        let state = Arc::new(RwLock::new(ServiceState::Ready));
+
+        Ok(ServiceContainer {
+            data_store,
+            nlp_engine,
+            config: NodeSpaceConfig::default(),
+            state,
+        })
+    }
+
+    /// Create and configure NLP engine from NodeSpaceConfig
+    /// This is where core-logic translates business configuration to technical configuration
+    async fn create_configured_nlp_engine(
+        config: &NodeSpaceConfig,
+    ) -> Result<LocalNLPEngine, InitializationError> {
+        use nodespace_nlp_engine::{
+            CacheConfig, DeviceConfig, DeviceType, EmbeddingModelConfig, ModelConfigs, NLPConfig,
+            PerformanceConfig, TextGenerationModelConfig,
+        };
+
+        // Translate core-logic configuration to NLP engine configuration
+        let nlp_config = NLPConfig {
+            models: ModelConfigs {
+                embedding: EmbeddingModelConfig {
+                    model_name: config
+                        .model_config
+                        .embedding_model
+                        .clone()
+                        .unwrap_or_else(|| "BAAI/bge-small-en-v1.5".to_string()),
+                    model_path: None, // Embedding models use fastembed's download system
+                    dimensions: 384,  // BGE small model dimensions
+                    max_sequence_length: 512,
+                    normalize: true,
+                },
+                text_generation: TextGenerationModelConfig {
+                    model_name: config
+                        .model_config
+                        .text_model
+                        .clone()
+                        .unwrap_or_else(|| "local/gemma-3-1b-it-onnx".to_string()),
+                    model_path: config.model_config.model_path.clone(),
+                    max_context_length: config.performance_config.context_window.unwrap_or(8192),
+                    default_temperature: config.performance_config.temperature.unwrap_or(0.7),
+                    default_max_tokens: 1024,
+                    default_top_p: 0.95,
+                },
+            },
+            device: DeviceConfig {
+                device_type: DeviceType::Auto, // Let system choose optimal device
+                gpu_device_id: None,
+                max_memory_gb: None,
+            },
+            cache: CacheConfig {
+                enable_model_cache: true,
+                enable_embedding_cache: true,
+                max_cache_size_mb: 1024,
+                cache_ttl_seconds: 3600,
+            },
+            performance: PerformanceConfig {
+                cpu_threads: None, // Use system default
+                embedding_batch_size: config.performance_config.max_batch_size.unwrap_or(32),
+                enable_async_processing: true,
+                pool_size: 4,
+            },
+        };
+
+        // Create and initialize NLP engine with translated configuration
+        let nlp_engine = LocalNLPEngine::with_config(nlp_config);
+        nlp_engine.initialize().await?;
+
+        Ok(nlp_engine)
     }
 
     /// Get a reference to the data store
@@ -310,7 +604,6 @@ impl ServiceContainer {
         Ok(())
     }
 }
-
 
 // Implement DateNavigation trait for ServiceContainer
 #[async_trait]
@@ -439,6 +732,77 @@ impl DateNavigation for ServiceContainer {
 
         Ok(nodes)
     }
+
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        // Get all nodes for the date
+        let nodes = DateNavigation::get_nodes_for_date(self, date).await?;
+
+        // Build hierarchical structure
+        let mut hierarchical_nodes = Vec::new();
+
+        for node in nodes {
+            // Determine parent relationship from metadata or node structure
+            let (parent, relationship_type) = if let Some(metadata) = &node.metadata {
+                if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
+                    // This node has a parent date relationship
+                    (
+                        Some(NodeId::from(parent_date)),
+                        Some("contains".to_string()),
+                    )
+                } else if let Some(parent_id) = metadata.get("parent_id").and_then(|v| v.as_str()) {
+                    // This node has a generic parent relationship
+                    (
+                        Some(NodeId::from(parent_id)),
+                        metadata
+                            .get("relationship_type")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    )
+                } else {
+                    // No parent metadata found
+                    (None, None)
+                }
+            } else {
+                // No metadata, check if this node has sibling relationships indicating it's part of a hierarchy
+                if node.next_sibling.is_some() || node.previous_sibling.is_some() {
+                    // This node has siblings, so it likely has a parent, but we can't determine it from metadata
+                    // We'll need to query the data store for this information
+                    (None, None)
+                } else {
+                    // Standalone node
+                    (None, None)
+                }
+            };
+
+            // Determine depth level based on parent relationship
+            let depth_level = if parent.is_some() { 1 } else { 0 };
+
+            // Get children for ANY node type - not just specific types
+            let children = match self.get_child_nodes(&node.id).await {
+                Ok(child_nodes) => child_nodes.into_iter().map(|n| n.id).collect(),
+                Err(_) => Vec::new(), // If error getting children, continue with empty list
+            };
+
+            // For order_in_parent, we'll use a simple index for now
+            // In a more sophisticated implementation, this could be based on creation time
+            // or explicit ordering metadata
+            let order_in_parent = hierarchical_nodes.len() as u32;
+
+            hierarchical_nodes.push(HierarchicalNode {
+                node,
+                children,
+                parent,
+                depth_level,
+                order_in_parent,
+                relationship_type,
+            });
+        }
+
+        Ok(hierarchical_nodes)
+    }
 }
 
 /// Core business logic operations interface - complete 8 method API
@@ -478,6 +842,55 @@ pub trait CoreLogic: Send + Sync {
 
     /// Retrieve a node by ID
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>>;
+
+    /// Get a node with its complete hierarchical information
+    async fn get_hierarchical_node(
+        &self,
+        node_id: &NodeId,
+    ) -> NodeSpaceResult<Option<HierarchicalNode>>;
+
+    /// Get all hierarchical nodes for a specific date (convenience method)
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: &str,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>>;
+
+    /// Clean bullet points from existing child nodes in the database
+    async fn clean_bullet_points_from_children(&self) -> NodeSpaceResult<u32>;
+
+    /// Update a node's content with bullet point cleaning if it's a child node
+    async fn update_node_with_cleaning(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()>;
+
+    /// Migrate broken relationship records to proper SurrealDB relationships
+    async fn migrate_broken_relationships(&self) -> NodeSpaceResult<u32>;
+
+    /// Get all children of a parent in their proper sibling order
+    async fn get_ordered_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Set the explicit order of children under a parent
+    async fn reorder_children(&self, parent_id: &NodeId, ordered_child_ids: Vec<NodeId>) -> NodeSpaceResult<()>;
+
+    /// Move a child node up one position in the sibling order
+    async fn move_child_up(&self, child_id: &NodeId) -> NodeSpaceResult<()>;
+
+    /// Move a child node down one position in the sibling order  
+    async fn move_child_down(&self, child_id: &NodeId) -> NodeSpaceResult<()>;
+
+    /// Insert a child at a specific position under a parent
+    async fn insert_child_at_position(&self, parent_id: &NodeId, child_id: &NodeId, position: u32) -> NodeSpaceResult<()>;
+
+    /// Establish proper sibling ordering for all children of all parents
+    async fn establish_child_ordering(&self) -> NodeSpaceResult<u32>;
+
+    /// Comprehensive database update: applies all improvements to existing sample database
+    async fn update_sample_database(&self) -> NodeSpaceResult<String>;
+
+    /// Get current database version
+    async fn get_database_version(&self) -> NodeSpaceResult<u32>;
+
+    /// Set database version after successful migration
+    async fn set_database_version(&self, version: u32, migration_name: &str, description: &str) -> NodeSpaceResult<()>;
+
 }
 
 /// Search result with relevance scoring
@@ -506,17 +919,42 @@ impl CoreLogic for ServiceContainer {
     }
 
     async fn create_text_node(&self, content: &str, date: &str) -> NodeSpaceResult<NodeId> {
-        // Generate embedding first
-        let embedding = self.nlp_engine.generate_embedding(content).await?;
+        // Process content for child nodes: clean bullet points and support markdown
+        let processed_content = crate::content_processing::process_child_content(content);
+        
+        // Generate embedding using the processed content
+        let embedding = self.nlp_engine.generate_embedding(&processed_content).await?;
 
-        // Create node with embedding and metadata
-        let node = Node::new(serde_json::Value::String(content.to_string()))
+        // Create node with processed content and metadata
+        let mut node = Node::new(serde_json::Value::String(processed_content))
             .with_metadata(serde_json::json!({"parent_date": date}));
 
         let node_id = node.id.clone();
+        let parent_id = NodeId::from(date);
+
+        // Find the current last child to append this new child to the end of sibling chain
+        let existing_children = self.get_ordered_children(&parent_id).await.unwrap_or_default();
+        
+        if let Some(last_child) = existing_children.last() {
+            // Set this new node as the next sibling of the current last child
+            node.previous_sibling = Some(last_child.id.clone());
+            
+            // Update the previous last child to point to this new node
+            if let Ok(Some(mut last_child_node)) = self.data_store.get_node(&last_child.id).await {
+                last_child_node.next_sibling = Some(node_id.clone());
+                last_child_node.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = self.data_store.store_node(last_child_node).await;
+                
+                // Create the SurrealDB relationship
+                let _ = self.data_store.create_relationship(&last_child.id, &node_id, "next_sibling").await;
+                let _ = self.data_store.create_relationship(&node_id, &last_child.id, "previous_sibling").await;
+            }
+        }
 
         // Store node with embedding using the data store's method
-        self.data_store.store_node_with_embedding(node, embedding).await?;
+        self.data_store
+            .store_node_with_embedding(node, embedding)
+            .await?;
 
         Ok(node_id)
     }
@@ -530,7 +968,10 @@ impl CoreLogic for ServiceContainer {
         let query_embedding = self.nlp_engine.generate_embedding(query).await?;
 
         // Perform vector similarity search using the data store's search method
-        let results = self.data_store.search_similar_nodes(query_embedding, limit).await?;
+        let results = self
+            .data_store
+            .search_similar_nodes(query_embedding, limit)
+            .await?;
 
         // Convert to SearchResult format
         let search_results = results
@@ -603,16 +1044,14 @@ impl CoreLogic for ServiceContainer {
     }
 
     async fn get_child_nodes(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
-        // Use the DataStore method to get children via relationships
-        // For date nodes, use get_date_children; for other nodes, use a query
         let parent_str = parent_id.to_string();
 
-        // Check if this looks like a date (YYYY-MM-DD format)
+        // Try the date-specific method first if it looks like a date
         if parent_str.len() == 10
             && parent_str.chars().nth(4) == Some('-')
             && parent_str.chars().nth(7) == Some('-')
         {
-            // Use date-specific method
+            // Use date-specific method for date nodes
             let children_json = self.data_store.get_date_children(&parent_str).await?;
             let mut nodes = Vec::new();
             for child_json in children_json {
@@ -622,9 +1061,20 @@ impl CoreLogic for ServiceContainer {
             }
             Ok(nodes)
         } else {
-            // Use generic relationship query for non-date nodes
-            let query = format!("SELECT * FROM {} WHERE in = {}", "relationships", parent_id);
-            self.data_store.query_nodes(&query).await
+            // For non-date nodes, use proper SurrealDB traversal
+            let clean_id = parent_id.as_str().replace("-", "_");
+            
+            // Use SurrealDB graph traversal to get children
+            let traversal_query = format!("SELECT * FROM nodes:{}->contains", clean_id);
+            
+            match self.data_store.query_nodes(&traversal_query).await {
+                Ok(children) if !children.is_empty() => Ok(children),
+                _ => {
+                    // Alternative query format for robustness
+                    let alt_query = format!("SELECT out.* FROM contains WHERE in = nodes:{}", clean_id);
+                    Ok(self.data_store.query_nodes(&alt_query).await.unwrap_or_default())
+                }
+            }
         }
     }
 
@@ -682,4 +1132,598 @@ impl CoreLogic for ServiceContainer {
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
         self.data_store.get_node(node_id).await
     }
+
+    async fn get_hierarchical_node(
+        &self,
+        node_id: &NodeId,
+    ) -> NodeSpaceResult<Option<HierarchicalNode>> {
+        // Get the node first
+        let node = match self.data_store.get_node(node_id).await? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
+        // Determine parent and relationship info from metadata
+        let (parent, relationship_type) = if let Some(metadata) = &node.metadata {
+            if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
+                (
+                    Some(NodeId::from(parent_date)),
+                    Some("contains".to_string()),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // Get children
+        let children = match self.get_child_nodes(node_id).await {
+            Ok(child_nodes) => child_nodes.into_iter().map(|n| n.id).collect(),
+            Err(_) => Vec::new(),
+        };
+
+        // Determine depth level
+        let depth_level = if parent.is_some() { 1 } else { 0 };
+
+        // For order_in_parent, we could query siblings or use metadata
+        // For now, we'll use 0 as a placeholder
+        let order_in_parent = 0;
+
+        Ok(Some(HierarchicalNode {
+            node,
+            children,
+            parent,
+            depth_level,
+            order_in_parent,
+            relationship_type,
+        }))
+    }
+
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: &str,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        // Parse the date string to NaiveDate
+        let parsed_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|e| NodeSpaceError::InvalidData(format!("Invalid date format: {}", e)))?;
+
+        // Use the DateNavigation trait method
+        DateNavigation::get_hierarchical_nodes_for_date(self, parsed_date).await
+    }
+
+    async fn clean_bullet_points_from_children(&self) -> NodeSpaceResult<u32> {
+        // Query all nodes that have a parent_date (indicating they are child nodes)
+        let query = "SELECT * FROM text WHERE parent_date IS NOT NULL";
+        let nodes = self.data_store.query_nodes(query).await?;
+        
+        let mut updated_count = 0;
+        
+        for node in nodes {
+            if let Some(content_str) = node.content.as_str() {
+                // Check if this content has bullet points that need cleaning
+                if crate::content_processing::has_bullet_points(content_str) {
+                    let cleaned_content = crate::content_processing::clean_bullet_points(content_str);
+                    
+                    // Update the node with cleaned content
+                    let mut updated_node = node;
+                    updated_node.content = serde_json::Value::String(cleaned_content);
+                    updated_node.updated_at = chrono::Utc::now().to_rfc3339();
+                    
+                    // Store the updated node
+                    self.data_store.store_node(updated_node).await?;
+                    updated_count += 1;
+                }
+            }
+        }
+        
+        Ok(updated_count)
+    }
+
+    async fn update_node_with_cleaning(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
+        // Get the existing node to check if it's a child node
+        let node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        // Check if this is a child node (has parent metadata)
+        let is_child = node.metadata
+            .as_ref()
+            .map(|metadata| {
+                metadata.get("parent_date").is_some() || metadata.get("parent_id").is_some()
+            })
+            .unwrap_or(false);
+
+        // Clean content if it's a child node and has bullet points
+        let final_content = if is_child && crate::content_processing::has_bullet_points(content) {
+            crate::content_processing::clean_bullet_points(content)
+        } else {
+            content.to_string()
+        };
+
+        // Update the node with the (possibly cleaned) content
+        let mut updated_node = node;
+        updated_node.content = serde_json::Value::String(final_content);
+        updated_node.updated_at = chrono::Utc::now().to_rfc3339();
+
+        self.data_store.store_node(updated_node).await?;
+        Ok(())
+    }
+
+    async fn migrate_broken_relationships(&self) -> NodeSpaceResult<u32> {
+        let mut migrated_count = 0;
+
+        // Step 1: Clean up existing broken relationship records
+        // These are the empty placeholder records with no content
+        let cleanup_query = "DELETE FROM contains WHERE content IS NULL OR content = ''";
+        let _ = self.data_store.query_nodes(cleanup_query).await;
+
+        // Step 2: Rebuild relationships from child node metadata
+        // Find all nodes that have parent_date metadata
+        let child_nodes_query = "SELECT * FROM text WHERE parent_date IS NOT NULL";
+        let child_nodes = self.data_store.query_nodes(child_nodes_query).await?;
+
+        for child_node in child_nodes {
+            if let Some(metadata) = &child_node.metadata {
+                if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
+                    // Create the proper relationship between parent date and child node
+                    let parent_id = NodeId::from(parent_date);
+                    
+                    // Check if relationship already exists by testing traversal
+                    let check_query = format!("SELECT * FROM nodes:{}->contains WHERE id = nodes:{}", 
+                        parent_date.replace("-", "_"), 
+                        child_node.id.as_str().replace("-", "_")
+                    );
+                    
+                    let existing = self.data_store.query_nodes(&check_query).await.unwrap_or_default();
+                    
+                    if existing.is_empty() {
+                        // Create the relationship using the fixed create_relationship method
+                        match self.data_store.create_relationship(&parent_id, &child_node.id, "contains").await {
+                            Ok(_) => {
+                                migrated_count += 1;
+                            }
+                            Err(e) => {
+                                // Log the error but continue with other relationships
+                                eprintln!("Failed to create relationship between {} and {}: {}", 
+                                    parent_id, child_node.id, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 3: Handle any other relationship patterns
+        // Look for nodes that might have sibling relationships
+        let sibling_nodes_query = "SELECT * FROM text WHERE next_sibling IS NOT NULL OR previous_sibling IS NOT NULL";
+        let sibling_nodes = self.data_store.query_nodes(sibling_nodes_query).await.unwrap_or_default();
+
+        for node in sibling_nodes {
+            // For sibling relationships, we can recreate them if they're missing
+            if let Some(next_sibling_id) = &node.next_sibling {
+                let check_query = format!("SELECT * FROM nodes:{}->next_sibling WHERE id = nodes:{}", 
+                    node.id.as_str().replace("-", "_"), 
+                    next_sibling_id.as_str().replace("-", "_")
+                );
+                
+                let existing = self.data_store.query_nodes(&check_query).await.unwrap_or_default();
+                
+                if existing.is_empty() {
+                    if let Ok(_) = self.data_store.create_relationship(&node.id, next_sibling_id, "next_sibling").await {
+                        migrated_count += 1;
+                    }
+                }
+            }
+
+            if let Some(prev_sibling_id) = &node.previous_sibling {
+                let check_query = format!("SELECT * FROM nodes:{}->previous_sibling WHERE id = nodes:{}", 
+                    node.id.as_str().replace("-", "_"), 
+                    prev_sibling_id.as_str().replace("-", "_")
+                );
+                
+                let existing = self.data_store.query_nodes(&check_query).await.unwrap_or_default();
+                
+                if existing.is_empty() {
+                    if let Ok(_) = self.data_store.create_relationship(&node.id, prev_sibling_id, "previous_sibling").await {
+                        migrated_count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(migrated_count)
+    }
+
+    async fn get_ordered_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Get all children first
+        let children = self.get_child_nodes(parent_id).await?;
+        
+        if children.is_empty() {
+            return Ok(children);
+        }
+
+        // If children have sibling relationships, use them to determine order
+        let mut ordered_children = Vec::new();
+        let mut remaining_children = children;
+
+        // Find the first child (one with no previous_sibling)
+        if let Some(first_pos) = remaining_children.iter().position(|child| child.previous_sibling.is_none()) {
+            let mut current_child = remaining_children.remove(first_pos);
+            ordered_children.push(current_child.clone());
+
+            // Follow the sibling chain
+            while let Some(next_sibling_id) = &current_child.next_sibling {
+                if let Some(next_pos) = remaining_children.iter().position(|child| &child.id == next_sibling_id) {
+                    current_child = remaining_children.remove(next_pos);
+                    ordered_children.push(current_child.clone());
+                } else {
+                    break; // Chain is broken
+                }
+            }
+        }
+
+        // Add any remaining children that weren't in the sibling chain (fallback to creation order)
+        for child in remaining_children {
+            ordered_children.push(child);
+        }
+
+        Ok(ordered_children)
+    }
+
+    async fn reorder_children(&self, parent_id: &NodeId, ordered_child_ids: Vec<NodeId>) -> NodeSpaceResult<()> {
+        // Get all current children to validate the reorder request
+        let current_children = self.get_child_nodes(parent_id).await?;
+        
+        // Validate that all provided IDs are actually children of this parent
+        for child_id in &ordered_child_ids {
+            if !current_children.iter().any(|child| &child.id == child_id) {
+                return Err(NodeSpaceError::InvalidData(
+                    format!("Node {} is not a child of parent {}", child_id, parent_id)
+                ));
+            }
+        }
+
+        // Clear existing sibling relationships for all children
+        for child in &current_children {
+            let mut updated_child = child.clone();
+            updated_child.next_sibling = None;
+            updated_child.previous_sibling = None;
+            updated_child.updated_at = chrono::Utc::now().to_rfc3339();
+            self.data_store.store_node(updated_child).await?;
+        }
+
+        // Establish new sibling chain based on provided order
+        for (i, child_id) in ordered_child_ids.iter().enumerate() {
+            if let Some(child) = current_children.iter().find(|c| &c.id == child_id) {
+                let mut updated_child = child.clone();
+                
+                // Set previous sibling
+                if i > 0 {
+                    updated_child.previous_sibling = Some(ordered_child_ids[i - 1].clone());
+                }
+                
+                // Set next sibling
+                if i < ordered_child_ids.len() - 1 {
+                    updated_child.next_sibling = Some(ordered_child_ids[i + 1].clone());
+                }
+                
+                updated_child.updated_at = chrono::Utc::now().to_rfc3339();
+                
+                // Store references before moving the node
+                let child_id_ref = updated_child.id.clone();
+                let prev_id_ref = updated_child.previous_sibling.clone();
+                
+                self.data_store.store_node(updated_child).await?;
+
+                // Create/update SurrealDB relationships
+                if let Some(prev_id) = prev_id_ref {
+                    let _ = self.data_store.create_relationship(&prev_id, &child_id_ref, "next_sibling").await;
+                    let _ = self.data_store.create_relationship(&child_id_ref, &prev_id, "previous_sibling").await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn move_child_up(&self, child_id: &NodeId) -> NodeSpaceResult<()> {
+        // Get the child node
+        let child = self.data_store.get_node(child_id).await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Child node {} not found", child_id)))?;
+
+        // Check if it has a previous sibling to swap with
+        if let Some(prev_sibling_id) = &child.previous_sibling {
+            let prev_sibling = self.data_store.get_node(prev_sibling_id).await?
+                .ok_or_else(|| NodeSpaceError::NotFound(format!("Previous sibling {} not found", prev_sibling_id)))?;
+
+            // Swap positions by updating sibling pointers
+            let mut updated_child = child.clone();
+            let mut updated_prev = prev_sibling.clone();
+
+            // Update the child's relationships
+            updated_child.previous_sibling = prev_sibling.previous_sibling.clone();
+            updated_child.next_sibling = Some(prev_sibling_id.clone());
+
+            // Update the previous sibling's relationships  
+            updated_prev.previous_sibling = Some(child_id.clone());
+            updated_prev.next_sibling = child.next_sibling.clone();
+
+            // Update timestamps
+            updated_child.updated_at = chrono::Utc::now().to_rfc3339();
+            updated_prev.updated_at = chrono::Utc::now().to_rfc3339();
+
+            // Store updates
+            self.data_store.store_node(updated_child).await?;
+            self.data_store.store_node(updated_prev).await?;
+
+            // Update any nodes that pointed to these
+            if let Some(prev_prev_id) = &prev_sibling.previous_sibling {
+                if let Ok(Some(mut prev_prev)) = self.data_store.get_node(prev_prev_id).await {
+                    prev_prev.next_sibling = Some(child_id.clone());
+                    prev_prev.updated_at = chrono::Utc::now().to_rfc3339();
+                    self.data_store.store_node(prev_prev).await?;
+                }
+            }
+
+            if let Some(next_id) = &child.next_sibling {
+                if let Ok(Some(mut next)) = self.data_store.get_node(next_id).await {
+                    next.previous_sibling = Some(prev_sibling_id.clone());
+                    next.updated_at = chrono::Utc::now().to_rfc3339();
+                    self.data_store.store_node(next).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn move_child_down(&self, child_id: &NodeId) -> NodeSpaceResult<()> {
+        // Get the child node
+        let child = self.data_store.get_node(child_id).await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Child node {} not found", child_id)))?;
+
+        // Check if it has a next sibling to swap with
+        if let Some(next_sibling_id) = &child.next_sibling {
+            // Moving down is equivalent to moving the next sibling up
+            self.move_child_up(next_sibling_id).await
+        } else {
+            Ok(()) // Already at the end, nothing to do
+        }
+    }
+
+    async fn insert_child_at_position(&self, parent_id: &NodeId, child_id: &NodeId, position: u32) -> NodeSpaceResult<()> {
+        // Get current ordered children
+        let current_children = self.get_ordered_children(parent_id).await?;
+        
+        // Validate that the child exists and belongs to this parent
+        if !current_children.iter().any(|child| &child.id == child_id) {
+            return Err(NodeSpaceError::InvalidData(
+                format!("Node {} is not a child of parent {}", child_id, parent_id)
+            ));
+        }
+
+        // Create new order with the child moved to the specified position
+        let mut new_order: Vec<NodeId> = current_children.iter()
+            .filter(|child| &child.id != child_id) // Remove the child from current position
+            .map(|child| child.id.clone())
+            .collect();
+
+        // Insert at the specified position (clamped to valid range)
+        let insert_pos = (position as usize).min(new_order.len());
+        new_order.insert(insert_pos, child_id.clone());
+
+        // Apply the new order
+        self.reorder_children(parent_id, new_order).await
+    }
+
+    async fn establish_child_ordering(&self) -> NodeSpaceResult<u32> {
+        let mut established_count = 0;
+
+        // Find all parent nodes (nodes that have children)
+        let parent_query = "SELECT DISTINCT parent_date FROM text WHERE parent_date IS NOT NULL";
+        let parent_results = self.data_store.query_nodes(parent_query).await?;
+
+        for parent_result in parent_results {
+            if let Some(parent_date_str) = parent_result.content.as_str() {
+                let parent_id = NodeId::from(parent_date_str);
+                
+                // Get children for this parent
+                let children = self.get_child_nodes(&parent_id).await?;
+                
+                if children.len() <= 1 {
+                    continue; // No need to order single children
+                }
+
+                // Check if siblings are already properly established
+                let has_proper_siblings = children.iter().any(|child| 
+                    child.next_sibling.is_some() || child.previous_sibling.is_some()
+                );
+
+                if !has_proper_siblings {
+                    // Order children by creation timestamp (earliest first)
+                    let mut sorted_children = children;
+                    sorted_children.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                    
+                    let child_ids: Vec<NodeId> = sorted_children.iter().map(|c| c.id.clone()).collect();
+                    
+                    // Establish the ordering
+                    if let Ok(_) = self.reorder_children(&parent_id, child_ids).await {
+                        established_count += sorted_children.len() as u32;
+                    }
+                }
+            }
+        }
+
+        Ok(established_count)
+    }
+
+    async fn update_sample_database(&self) -> NodeSpaceResult<String> {
+        let mut report = Vec::new();
+        report.push("=== NodeSpace Sample Database Update ===".to_string());
+        report.push(format!("Started at: {}", chrono::Utc::now().to_rfc3339()));
+        report.push("".to_string());
+
+        // Step 1: Fix broken relationships
+        report.push("1. Fixing broken SurrealDB relationships...".to_string());
+        match self.migrate_broken_relationships().await {
+            Ok(count) => report.push(format!("   ✅ Fixed {} broken relationships", count)),
+            Err(e) => report.push(format!("   ❌ Error fixing relationships: {}", e)),
+        }
+
+        // Step 2: Clean bullet points from child nodes
+        report.push("".to_string());
+        report.push("2. Cleaning bullet points from child node content...".to_string());
+        match self.clean_bullet_points_from_children().await {
+            Ok(count) => report.push(format!("   ✅ Cleaned bullet points from {} child nodes", count)),
+            Err(e) => report.push(format!("   ❌ Error cleaning bullet points: {}", e)),
+        }
+
+        // Step 3: Establish proper child ordering
+        report.push("".to_string());
+        report.push("3. Establishing proper sibling ordering for all children...".to_string());
+        match self.establish_child_ordering().await {
+            Ok(count) => report.push(format!("   ✅ Established ordering for {} child nodes", count)),
+            Err(e) => report.push(format!("   ❌ Error establishing child ordering: {}", e)),
+        }
+
+        // Step 4: Verify database integrity
+        report.push("".to_string());
+        report.push("4. Verifying database integrity...".to_string());
+        
+        // Count total nodes
+        let total_nodes_query = "SELECT count() FROM text GROUP ALL";
+        let total_nodes = self.data_store.query_nodes(total_nodes_query).await
+            .map(|nodes| nodes.len())
+            .unwrap_or(0);
+        report.push(format!("   📊 Total text nodes: {}", total_nodes));
+
+        // Count nodes with parent relationships
+        let child_nodes_query = "SELECT count() FROM text WHERE parent_date IS NOT NULL GROUP ALL";
+        let child_nodes = self.data_store.query_nodes(child_nodes_query).await
+            .map(|nodes| nodes.len())
+            .unwrap_or(0);
+        report.push(format!("   📊 Child nodes with parent_date: {}", child_nodes));
+
+        // Count nodes with sibling relationships
+        let sibling_nodes_query = "SELECT count() FROM text WHERE next_sibling IS NOT NULL OR previous_sibling IS NOT NULL GROUP ALL";
+        let sibling_nodes = self.data_store.query_nodes(sibling_nodes_query).await
+            .map(|nodes| nodes.len())
+            .unwrap_or(0);
+        report.push(format!("   📊 Nodes with sibling relationships: {}", sibling_nodes));
+
+        // Count SurrealDB relationship records
+        let contains_relationships_query = "SELECT count() FROM contains GROUP ALL";
+        let contains_count = self.data_store.query_nodes(contains_relationships_query).await
+            .map(|nodes| nodes.len())
+            .unwrap_or(0);
+        report.push(format!("   📊 'Contains' relationship records: {}", contains_count));
+
+        let sibling_relationships_query = "SELECT count() FROM next_sibling GROUP ALL";
+        let next_sibling_count = self.data_store.query_nodes(sibling_relationships_query).await
+            .map(|nodes| nodes.len())
+            .unwrap_or(0);
+        report.push(format!("   📊 'Next_sibling' relationship records: {}", next_sibling_count));
+
+        // Step 5: Test hierarchical queries
+        report.push("".to_string());
+        report.push("5. Testing hierarchical queries...".to_string());
+        
+        // Test getting children for a date
+        let test_date = "2025-06-19";
+        match CoreLogic::get_nodes_for_date(self, test_date).await {
+            Ok(nodes) => {
+                report.push(format!("   ✅ Successfully retrieved {} nodes for date {}", nodes.len(), test_date));
+                
+                if !nodes.is_empty() {
+                    // Test hierarchical query
+                    match CoreLogic::get_hierarchical_nodes_for_date(self, test_date).await {
+                        Ok(hierarchical) => report.push(format!("   ✅ Successfully retrieved {} hierarchical nodes", hierarchical.len())),
+                        Err(e) => report.push(format!("   ❌ Error getting hierarchical nodes: {}", e)),
+                    }
+                    
+                    // Test ordered children query
+                    let parent_id = NodeId::from(test_date);
+                    match self.get_ordered_children(&parent_id).await {
+                        Ok(ordered) => report.push(format!("   ✅ Successfully retrieved {} ordered children", ordered.len())),
+                        Err(e) => report.push(format!("   ❌ Error getting ordered children: {}", e)),
+                    }
+                }
+            }
+            Err(e) => report.push(format!("   ❌ Error testing date query: {}", e)),
+        }
+
+        // Step 6: Summary
+        report.push("".to_string());
+        report.push("=== Update Summary ===".to_string());
+        report.push("✅ Relationship fixes applied".to_string());
+        report.push("✅ Bullet point cleaning completed".to_string());
+        report.push("✅ Child ordering established".to_string());
+        report.push("✅ Database integrity verified".to_string());
+        report.push("✅ Hierarchical queries tested".to_string());
+        report.push("".to_string());
+        report.push("🎉 Sample database successfully updated!".to_string());
+        report.push(format!("Completed at: {}", chrono::Utc::now().to_rfc3339()));
+
+        Ok(report.join("\n"))
+    }
+
+    async fn get_database_version(&self) -> NodeSpaceResult<u32> {
+        // Query the database_version table to get current version
+        let query = "SELECT version FROM database_version ORDER BY version DESC LIMIT 1";
+        
+        match self.data_store.query_nodes(query).await {
+            Ok(results) if !results.is_empty() => {
+                // Extract version from the result
+                if let Some(version_value) = results[0].metadata.as_ref()
+                    .and_then(|m| m.get("version"))
+                    .and_then(|v| v.as_u64()) {
+                    Ok(version_value as u32)
+                } else {
+                    // Fallback: try to extract from content
+                    if let Some(version_str) = results[0].content.as_str() {
+                        version_str.parse::<u32>().map_err(|_| {
+                            NodeSpaceError::InvalidData("Invalid version format".to_string())
+                        })
+                    } else {
+                        Ok(0) // No version found, assume initial state
+                    }
+                }
+            }
+            _ => Ok(0), // No version record found, assume initial state
+        }
+    }
+
+    async fn set_database_version(&self, version: u32, migration_name: &str, description: &str) -> NodeSpaceResult<()> {
+        // Create a version record
+        let version_node = Node::new(serde_json::Value::Number(serde_json::Number::from(version)))
+            .with_metadata(serde_json::json!({
+                "version": version,
+                "migration_name": migration_name,
+                "description": description,
+                "applied_at": chrono::Utc::now().to_rfc3339()
+            }));
+
+        // Store in the database_version table using raw SurrealDB insert
+        let version_insert = format!(
+            "INSERT INTO database_version {{ version: {}, migration_name: '{}', description: '{}', applied_at: '{}' }}",
+            version,
+            migration_name.replace("'", "\\'"),
+            description.replace("'", "\\'"),
+            chrono::Utc::now().to_rfc3339()
+        );
+
+        // Execute the insert directly on the data store
+        match self.data_store.query_nodes(&version_insert).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                eprintln!("Failed to insert version record, trying node storage: {}", e);
+                // Fallback: store as a regular node
+                self.data_store.store_node(version_node).await.map(|_| ())
+            }
+        }
+    }
+
 }

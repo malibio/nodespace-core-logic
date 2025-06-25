@@ -10,3 +10,27 @@ Cargo.lock
 # OS files
 .DS_Store
 Thumbs.db
+
+# Database files (should be in data-store repo)
+*.db
+*.sqlite
+*.surql
+
+# ML model cache and downloads
+.fastembed_cache/
+models/
+*.onnx
+*.bin
+*.safetensors
+
+# Large binary files
+*.a
+*.o
+*.so
+*.dylib
+*.dll
+
+# Test artifacts
+test_database*
+fresh_sample_database*
+update_sample_database*
