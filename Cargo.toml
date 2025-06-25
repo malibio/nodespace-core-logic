@@ -14,6 +14,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -23,8 +24,9 @@ name = "fresh_sample_database"
 path = "examples/fresh_sample_database.rs"
 
 [[example]]
-name = "verify_sample_database"
-path = "examples/verify_sample_database.rs"
+name = "simple_hierarchical_test"
+path = "examples/simple_hierarchical_test.rs"
+
 
 [features]
 default = []

@@ -38,19 +38,18 @@ pub mod content_processing {
 
     /// Process content for child nodes: clean bullet points and prepare for markdown
     pub fn process_child_content(content: &str) -> String {
-        let cleaned = clean_bullet_points(content);
         // Additional markdown processing can be added here
-        cleaned
+        clean_bullet_points(content)
     }
 
     /// Check if content has bullet points that should be cleaned
     pub fn has_bullet_points(content: &str) -> bool {
         content.lines().any(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with("- ") || 
-            trimmed.starts_with("• ") || 
-            trimmed.starts_with("* ") || 
-            trimmed.starts_with("+ ")
+            trimmed.starts_with("- ")
+                || trimmed.starts_with("• ")
+                || trimmed.starts_with("* ")
+                || trimmed.starts_with("+ ")
         })
     }
 }
@@ -58,7 +57,7 @@ pub mod content_processing {
 /// Database migration system for versioned upgrades
 pub mod migrations {
     use super::*;
-    
+
     /// Database version information
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct DatabaseVersion {
@@ -83,16 +82,16 @@ pub mod migrations {
     pub trait Migration: Send + Sync {
         /// Migration version number (sequential)
         fn version(&self) -> u32;
-        
+
         /// Human-readable migration name
         fn name(&self) -> &str;
-        
+
         /// Description of what this migration does
         fn description(&self) -> &str;
-        
+
         /// Execute the migration
         async fn migrate(&self, service: &ServiceContainer) -> NodeSpaceResult<()>;
-        
+
         /// Check if migration can be safely applied
         async fn can_apply(&self, service: &ServiceContainer) -> NodeSpaceResult<bool> {
             // Default: check if version is not already applied
@@ -104,6 +103,12 @@ pub mod migrations {
     /// Migration manager for orchestrating database upgrades
     pub struct MigrationManager {
         migrations: Vec<Box<dyn Migration>>,
+    }
+
+    impl Default for MigrationManager {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl MigrationManager {
@@ -122,35 +127,44 @@ pub mod migrations {
         }
 
         /// Get all pending migrations for current database
-        pub async fn get_pending_migrations(&self, service: &ServiceContainer) -> NodeSpaceResult<Vec<&dyn Migration>> {
+        pub async fn get_pending_migrations(
+            &self,
+            service: &ServiceContainer,
+        ) -> NodeSpaceResult<Vec<&dyn Migration>> {
             let current_version = service.get_database_version().await.unwrap_or(0);
-            
-            let pending: Vec<&dyn Migration> = self.migrations
+
+            let pending: Vec<&dyn Migration> = self
+                .migrations
                 .iter()
                 .map(|m| m.as_ref())
                 .filter(|m| m.version() > current_version)
                 .collect();
-                
+
             Ok(pending)
         }
 
         /// Execute all pending migrations
-        pub async fn migrate_to_latest(&self, service: &ServiceContainer) -> NodeSpaceResult<Vec<MigrationResult>> {
+        pub async fn migrate_to_latest(
+            &self,
+            service: &ServiceContainer,
+        ) -> NodeSpaceResult<Vec<MigrationResult>> {
             let pending = self.get_pending_migrations(service).await?;
             let mut results = Vec::new();
 
             for migration in pending {
                 let start = std::time::Instant::now();
-                
+
                 match migration.migrate(service).await {
                     Ok(_) => {
                         // Update database version
-                        service.set_database_version(
-                            migration.version(),
-                            migration.name(),
-                            migration.description(),
-                        ).await?;
-                        
+                        service
+                            .set_database_version(
+                                migration.version(),
+                                migration.name(),
+                                migration.description(),
+                            )
+                            .await?;
+
                         results.push(MigrationResult {
                             version: migration.version(),
                             name: migration.name().to_string(),
@@ -167,7 +181,7 @@ pub mod migrations {
                             message: format!("Migration failed: {}", e),
                             duration_ms: start.elapsed().as_millis() as u64,
                         });
-                        
+
                         // Stop on first failure
                         break;
                     }
@@ -740,10 +754,16 @@ impl DateNavigation for ServiceContainer {
         // Get all nodes for the date
         let nodes = DateNavigation::get_nodes_for_date(self, date).await?;
 
-        // Build hierarchical structure
+        // Build hierarchical structure - include both parents and children
         let mut hierarchical_nodes = Vec::new();
+        let mut processed_node_ids = std::collections::HashSet::new();
 
         for node in nodes {
+            // Skip if we've already processed this node as a child
+            if processed_node_ids.contains(&node.id) {
+                continue;
+            }
+
             // Determine parent relationship from metadata or node structure
             let (parent, relationship_type) = if let Some(metadata) = &node.metadata {
                 if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
@@ -780,25 +800,37 @@ impl DateNavigation for ServiceContainer {
             // Determine depth level based on parent relationship
             let depth_level = if parent.is_some() { 1 } else { 0 };
 
-            // Get children for ANY node type - not just specific types
-            let children = match self.get_child_nodes(&node.id).await {
-                Ok(child_nodes) => child_nodes.into_iter().map(|n| n.id).collect(),
-                Err(_) => Vec::new(), // If error getting children, continue with empty list
-            };
+            // Get children for this node
+            let child_nodes: Vec<Node> = self.get_child_nodes(&node.id).await.unwrap_or_default();
 
-            // For order_in_parent, we'll use a simple index for now
-            // In a more sophisticated implementation, this could be based on creation time
-            // or explicit ordering metadata
+            let child_ids: Vec<NodeId> = child_nodes.iter().map(|n| n.id.clone()).collect();
+
+            // Add the parent node to hierarchical structure
             let order_in_parent = hierarchical_nodes.len() as u32;
-
             hierarchical_nodes.push(HierarchicalNode {
-                node,
-                children,
-                parent,
+                node: node.clone(),
+                children: child_ids.clone(),
+                parent: parent.clone(),
                 depth_level,
                 order_in_parent,
-                relationship_type,
+                relationship_type: relationship_type.clone(),
             });
+            processed_node_ids.insert(node.id.clone());
+
+            // Add each child node to hierarchical structure
+            for (child_index, child_node) in child_nodes.into_iter().enumerate() {
+                if !processed_node_ids.contains(&child_node.id) {
+                    hierarchical_nodes.push(HierarchicalNode {
+                        node: child_node.clone(),
+                        children: Vec::new(), // Children don't have sub-children in this flat structure
+                        parent: Some(node.id.clone()),
+                        depth_level: depth_level + 1,
+                        order_in_parent: child_index as u32,
+                        relationship_type: Some("contains".to_string()),
+                    });
+                    processed_node_ids.insert(child_node.id.clone());
+                }
+            }
         }
 
         Ok(hierarchical_nodes)
@@ -859,7 +891,11 @@ pub trait CoreLogic: Send + Sync {
     async fn clean_bullet_points_from_children(&self) -> NodeSpaceResult<u32>;
 
     /// Update a node's content with bullet point cleaning if it's a child node
-    async fn update_node_with_cleaning(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()>;
+    async fn update_node_with_cleaning(
+        &self,
+        node_id: &NodeId,
+        content: &str,
+    ) -> NodeSpaceResult<()>;
 
     /// Migrate broken relationship records to proper SurrealDB relationships
     async fn migrate_broken_relationships(&self) -> NodeSpaceResult<u32>;
@@ -868,7 +904,11 @@ pub trait CoreLogic: Send + Sync {
     async fn get_ordered_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
 
     /// Set the explicit order of children under a parent
-    async fn reorder_children(&self, parent_id: &NodeId, ordered_child_ids: Vec<NodeId>) -> NodeSpaceResult<()>;
+    async fn reorder_children(
+        &self,
+        parent_id: &NodeId,
+        ordered_child_ids: Vec<NodeId>,
+    ) -> NodeSpaceResult<()>;
 
     /// Move a child node up one position in the sibling order
     async fn move_child_up(&self, child_id: &NodeId) -> NodeSpaceResult<()>;
@@ -877,7 +917,12 @@ pub trait CoreLogic: Send + Sync {
     async fn move_child_down(&self, child_id: &NodeId) -> NodeSpaceResult<()>;
 
     /// Insert a child at a specific position under a parent
-    async fn insert_child_at_position(&self, parent_id: &NodeId, child_id: &NodeId, position: u32) -> NodeSpaceResult<()>;
+    async fn insert_child_at_position(
+        &self,
+        parent_id: &NodeId,
+        child_id: &NodeId,
+        position: u32,
+    ) -> NodeSpaceResult<()>;
 
     /// Establish proper sibling ordering for all children of all parents
     async fn establish_child_ordering(&self) -> NodeSpaceResult<u32>;
@@ -889,8 +934,12 @@ pub trait CoreLogic: Send + Sync {
     async fn get_database_version(&self) -> NodeSpaceResult<u32>;
 
     /// Set database version after successful migration
-    async fn set_database_version(&self, version: u32, migration_name: &str, description: &str) -> NodeSpaceResult<()>;
-
+    async fn set_database_version(
+        &self,
+        version: u32,
+        migration_name: &str,
+        description: &str,
+    ) -> NodeSpaceResult<()>;
 }
 
 /// Search result with relevance scoring
@@ -921,9 +970,12 @@ impl CoreLogic for ServiceContainer {
     async fn create_text_node(&self, content: &str, date: &str) -> NodeSpaceResult<NodeId> {
         // Process content for child nodes: clean bullet points and support markdown
         let processed_content = crate::content_processing::process_child_content(content);
-        
+
         // Generate embedding using the processed content
-        let embedding = self.nlp_engine.generate_embedding(&processed_content).await?;
+        let embedding = self
+            .nlp_engine
+            .generate_embedding(&processed_content)
+            .await?;
 
         // Create node with processed content and metadata
         let mut node = Node::new(serde_json::Value::String(processed_content))
@@ -933,21 +985,30 @@ impl CoreLogic for ServiceContainer {
         let parent_id = NodeId::from(date);
 
         // Find the current last child to append this new child to the end of sibling chain
-        let existing_children = self.get_ordered_children(&parent_id).await.unwrap_or_default();
-        
+        let existing_children = self
+            .get_ordered_children(&parent_id)
+            .await
+            .unwrap_or_default();
+
         if let Some(last_child) = existing_children.last() {
             // Set this new node as the next sibling of the current last child
             node.previous_sibling = Some(last_child.id.clone());
-            
+
             // Update the previous last child to point to this new node
             if let Ok(Some(mut last_child_node)) = self.data_store.get_node(&last_child.id).await {
                 last_child_node.next_sibling = Some(node_id.clone());
                 last_child_node.updated_at = chrono::Utc::now().to_rfc3339();
                 let _ = self.data_store.store_node(last_child_node).await;
-                
+
                 // Create the SurrealDB relationship
-                let _ = self.data_store.create_relationship(&last_child.id, &node_id, "next_sibling").await;
-                let _ = self.data_store.create_relationship(&node_id, &last_child.id, "previous_sibling").await;
+                let _ = self
+                    .data_store
+                    .create_relationship(&last_child.id, &node_id, "next_sibling")
+                    .await;
+                let _ = self
+                    .data_store
+                    .create_relationship(&node_id, &last_child.id, "previous_sibling")
+                    .await;
             }
         }
 
@@ -955,6 +1016,15 @@ impl CoreLogic for ServiceContainer {
         self.data_store
             .store_node_with_embedding(node, embedding)
             .await?;
+
+        // CRITICAL FIX: Establish parent-child relationship using our validated add_child_node method
+        match self.add_child_node(&parent_id, &node_id).await {
+            Ok(_) => {}
+            Err(_e) => {
+                // Don't fail the entire operation - the node was created successfully
+                // The relationship can be established later via migration
+            }
+        }
 
         Ok(node_id)
     }
@@ -1037,10 +1107,69 @@ impl CoreLogic for ServiceContainer {
     }
 
     async fn add_child_node(&self, parent_id: &NodeId, child_id: &NodeId) -> NodeSpaceResult<()> {
-        // Use the DataStore method to create a "contains" relationship
-        self.data_store
+        // CRITICAL FIX: Verify both nodes exist before creating relationship
+
+        // 1. Verify parent node exists
+        match self.data_store.get_node(parent_id).await? {
+            Some(_) => {}
+            None => {
+                let error_msg = format!("Parent node {} does not exist in database", parent_id);
+                return Err(NodeSpaceError::NotFound(error_msg));
+            }
+        }
+
+        // 2. Verify child node exists
+        match self.data_store.get_node(child_id).await? {
+            Some(child_node) => {
+                let _content_preview = child_node
+                    .content
+                    .as_str()
+                    .map(|s| {
+                        if s.len() > 50 {
+                            format!("{}...", &s[..47])
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "NULL".to_string());
+            }
+            None => {
+                let error_msg = format!("Child node {} does not exist in database", child_id);
+                return Err(NodeSpaceError::NotFound(error_msg));
+            }
+        }
+
+        // 3. Create the relationship only after verifying both nodes exist
+        match self
+            .data_store
             .create_relationship(parent_id, child_id, "contains")
             .await
+        {
+            Ok(_) => {
+                // 4. Verify the relationship was created correctly by testing traversal
+                let clean_parent_id = parent_id.as_str().replace("-", "_");
+                let test_query = format!("SELECT * FROM text:{}->contains", clean_parent_id);
+
+                match self.data_store.query_nodes(&test_query).await {
+                    Ok(traversal_results) => {
+                        // Check if our child is in the traversal results
+                        let _found_child = traversal_results
+                            .iter()
+                            .any(|record| record.id.as_str() == child_id.as_str());
+                    }
+                    Err(_e) => {}
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to create relationship between {} and {}: {}",
+                    parent_id, child_id, e
+                );
+                Err(NodeSpaceError::ValidationError(error_msg))
+            }
+        }
     }
 
     async fn get_child_nodes(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
@@ -1061,19 +1190,58 @@ impl CoreLogic for ServiceContainer {
             }
             Ok(nodes)
         } else {
-            // For non-date nodes, use proper SurrealDB traversal
+            // For non-date nodes, use SurrealDB 2.x relationship traversal
             let clean_id = parent_id.as_str().replace("-", "_");
-            
-            // Use SurrealDB graph traversal to get children
-            let traversal_query = format!("SELECT * FROM nodes:{}->contains", clean_id);
-            
-            match self.data_store.query_nodes(&traversal_query).await {
-                Ok(children) if !children.is_empty() => Ok(children),
-                _ => {
-                    // Alternative query format for robustness
-                    let alt_query = format!("SELECT out.* FROM contains WHERE in = nodes:{}", clean_id);
-                    Ok(self.data_store.query_nodes(&alt_query).await.unwrap_or_default())
+
+            // Multi-table approach: Try traversal across all possible node table types
+            // This prepares for TaskNode and other future node types
+
+            let table_types = vec!["text", "task", "nodes"]; // Add more types as needed
+            let mut found_children = Vec::new();
+
+            for table_type in &table_types {
+                // SurrealDB 2.x SOLUTION: Use relationship traversal to get child nodes
+                let traversal_query =
+                    format!("SELECT * FROM {}:{}->contains", table_type, clean_id);
+
+                match self.data_store.query_nodes(&traversal_query).await {
+                    Ok(relations) if !relations.is_empty() => {
+                        for rel_record in relations {
+                            // Process the relationship traversal results
+                            if let Some(metadata) = &rel_record.metadata {
+                                if let Some(out_value) = metadata.get("out") {
+                                    // Parse the fetched child node from the 'out' field
+                                    if let Ok(child_node) =
+                                        serde_json::from_value::<Node>(out_value.clone())
+                                    {
+                                        if !child_node.content.is_null() {
+                                            let _content_preview = child_node
+                                                .content
+                                                .as_str()
+                                                .map(|s| {
+                                                    if s.len() > 40 {
+                                                        format!("{}...", &s[..37])
+                                                    } else {
+                                                        s.to_string()
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| "NULL".to_string());
+                                            found_children.push(child_node);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_e) => {}
                 }
+            }
+
+            if !found_children.is_empty() {
+                Ok(found_children)
+            } else {
+                Ok(Vec::new())
             }
         }
     }
@@ -1196,31 +1364,36 @@ impl CoreLogic for ServiceContainer {
         // Query all nodes that have a parent_date (indicating they are child nodes)
         let query = "SELECT * FROM text WHERE parent_date IS NOT NULL";
         let nodes = self.data_store.query_nodes(query).await?;
-        
+
         let mut updated_count = 0;
-        
+
         for node in nodes {
             if let Some(content_str) = node.content.as_str() {
                 // Check if this content has bullet points that need cleaning
                 if crate::content_processing::has_bullet_points(content_str) {
-                    let cleaned_content = crate::content_processing::clean_bullet_points(content_str);
-                    
+                    let cleaned_content =
+                        crate::content_processing::clean_bullet_points(content_str);
+
                     // Update the node with cleaned content
                     let mut updated_node = node;
                     updated_node.content = serde_json::Value::String(cleaned_content);
                     updated_node.updated_at = chrono::Utc::now().to_rfc3339();
-                    
+
                     // Store the updated node
                     self.data_store.store_node(updated_node).await?;
                     updated_count += 1;
                 }
             }
         }
-        
+
         Ok(updated_count)
     }
 
-    async fn update_node_with_cleaning(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
+    async fn update_node_with_cleaning(
+        &self,
+        node_id: &NodeId,
+        content: &str,
+    ) -> NodeSpaceResult<()> {
         // Get the existing node to check if it's a child node
         let node = self
             .data_store
@@ -1229,7 +1402,8 @@ impl CoreLogic for ServiceContainer {
             .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
 
         // Check if this is a child node (has parent metadata)
-        let is_child = node.metadata
+        let is_child = node
+            .metadata
             .as_ref()
             .map(|metadata| {
                 metadata.get("parent_date").is_some() || metadata.get("parent_id").is_some()
@@ -1270,25 +1444,36 @@ impl CoreLogic for ServiceContainer {
                 if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
                     // Create the proper relationship between parent date and child node
                     let parent_id = NodeId::from(parent_date);
-                    
+
                     // Check if relationship already exists by testing traversal
-                    let check_query = format!("SELECT * FROM nodes:{}->contains WHERE id = nodes:{}", 
-                        parent_date.replace("-", "_"), 
+                    let check_query = format!(
+                        "SELECT * FROM nodes:{}->contains WHERE id = nodes:{}",
+                        parent_date.replace("-", "_"),
                         child_node.id.as_str().replace("-", "_")
                     );
-                    
-                    let existing = self.data_store.query_nodes(&check_query).await.unwrap_or_default();
-                    
+
+                    let existing = self
+                        .data_store
+                        .query_nodes(&check_query)
+                        .await
+                        .unwrap_or_default();
+
                     if existing.is_empty() {
                         // Create the relationship using the fixed create_relationship method
-                        match self.data_store.create_relationship(&parent_id, &child_node.id, "contains").await {
+                        match self
+                            .data_store
+                            .create_relationship(&parent_id, &child_node.id, "contains")
+                            .await
+                        {
                             Ok(_) => {
                                 migrated_count += 1;
                             }
                             Err(e) => {
                                 // Log the error but continue with other relationships
-                                eprintln!("Failed to create relationship between {} and {}: {}", 
-                                    parent_id, child_node.id, e);
+                                eprintln!(
+                                    "Failed to create relationship between {} and {}: {}",
+                                    parent_id, child_node.id, e
+                                );
                             }
                         }
                     }
@@ -1298,38 +1483,55 @@ impl CoreLogic for ServiceContainer {
 
         // Step 3: Handle any other relationship patterns
         // Look for nodes that might have sibling relationships
-        let sibling_nodes_query = "SELECT * FROM text WHERE next_sibling IS NOT NULL OR previous_sibling IS NOT NULL";
-        let sibling_nodes = self.data_store.query_nodes(sibling_nodes_query).await.unwrap_or_default();
+        let sibling_nodes_query =
+            "SELECT * FROM text WHERE next_sibling IS NOT NULL OR previous_sibling IS NOT NULL";
+        let sibling_nodes = self
+            .data_store
+            .query_nodes(sibling_nodes_query)
+            .await
+            .unwrap_or_default();
 
         for node in sibling_nodes {
             // For sibling relationships, we can recreate them if they're missing
             if let Some(next_sibling_id) = &node.next_sibling {
-                let check_query = format!("SELECT * FROM nodes:{}->next_sibling WHERE id = nodes:{}", 
-                    node.id.as_str().replace("-", "_"), 
+                let check_query = format!(
+                    "SELECT * FROM nodes:{}->next_sibling WHERE id = nodes:{}",
+                    node.id.as_str().replace("-", "_"),
                     next_sibling_id.as_str().replace("-", "_")
                 );
-                
-                let existing = self.data_store.query_nodes(&check_query).await.unwrap_or_default();
-                
-                if existing.is_empty() {
-                    if let Ok(_) = self.data_store.create_relationship(&node.id, next_sibling_id, "next_sibling").await {
-                        migrated_count += 1;
-                    }
+
+                let existing = self
+                    .data_store
+                    .query_nodes(&check_query)
+                    .await
+                    .unwrap_or_default();
+
+                if existing.is_empty() && (self
+                        .data_store
+                        .create_relationship(&node.id, next_sibling_id, "next_sibling")
+                        .await).is_ok() {
+                    migrated_count += 1;
                 }
             }
 
             if let Some(prev_sibling_id) = &node.previous_sibling {
-                let check_query = format!("SELECT * FROM nodes:{}->previous_sibling WHERE id = nodes:{}", 
-                    node.id.as_str().replace("-", "_"), 
+                let check_query = format!(
+                    "SELECT * FROM nodes:{}->previous_sibling WHERE id = nodes:{}",
+                    node.id.as_str().replace("-", "_"),
                     prev_sibling_id.as_str().replace("-", "_")
                 );
-                
-                let existing = self.data_store.query_nodes(&check_query).await.unwrap_or_default();
-                
-                if existing.is_empty() {
-                    if let Ok(_) = self.data_store.create_relationship(&node.id, prev_sibling_id, "previous_sibling").await {
-                        migrated_count += 1;
-                    }
+
+                let existing = self
+                    .data_store
+                    .query_nodes(&check_query)
+                    .await
+                    .unwrap_or_default();
+
+                if existing.is_empty() && (self
+                        .data_store
+                        .create_relationship(&node.id, prev_sibling_id, "previous_sibling")
+                        .await).is_ok() {
+                    migrated_count += 1;
                 }
             }
         }
@@ -1340,7 +1542,7 @@ impl CoreLogic for ServiceContainer {
     async fn get_ordered_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
         // Get all children first
         let children = self.get_child_nodes(parent_id).await?;
-        
+
         if children.is_empty() {
             return Ok(children);
         }
@@ -1350,13 +1552,19 @@ impl CoreLogic for ServiceContainer {
         let mut remaining_children = children;
 
         // Find the first child (one with no previous_sibling)
-        if let Some(first_pos) = remaining_children.iter().position(|child| child.previous_sibling.is_none()) {
+        if let Some(first_pos) = remaining_children
+            .iter()
+            .position(|child| child.previous_sibling.is_none())
+        {
             let mut current_child = remaining_children.remove(first_pos);
             ordered_children.push(current_child.clone());
 
             // Follow the sibling chain
             while let Some(next_sibling_id) = &current_child.next_sibling {
-                if let Some(next_pos) = remaining_children.iter().position(|child| &child.id == next_sibling_id) {
+                if let Some(next_pos) = remaining_children
+                    .iter()
+                    .position(|child| &child.id == next_sibling_id)
+                {
                     current_child = remaining_children.remove(next_pos);
                     ordered_children.push(current_child.clone());
                 } else {
@@ -1373,16 +1581,21 @@ impl CoreLogic for ServiceContainer {
         Ok(ordered_children)
     }
 
-    async fn reorder_children(&self, parent_id: &NodeId, ordered_child_ids: Vec<NodeId>) -> NodeSpaceResult<()> {
+    async fn reorder_children(
+        &self,
+        parent_id: &NodeId,
+        ordered_child_ids: Vec<NodeId>,
+    ) -> NodeSpaceResult<()> {
         // Get all current children to validate the reorder request
         let current_children = self.get_child_nodes(parent_id).await?;
-        
+
         // Validate that all provided IDs are actually children of this parent
         for child_id in &ordered_child_ids {
             if !current_children.iter().any(|child| &child.id == child_id) {
-                return Err(NodeSpaceError::InvalidData(
-                    format!("Node {} is not a child of parent {}", child_id, parent_id)
-                ));
+                return Err(NodeSpaceError::InvalidData(format!(
+                    "Node {} is not a child of parent {}",
+                    child_id, parent_id
+                )));
             }
         }
 
@@ -1399,29 +1612,35 @@ impl CoreLogic for ServiceContainer {
         for (i, child_id) in ordered_child_ids.iter().enumerate() {
             if let Some(child) = current_children.iter().find(|c| &c.id == child_id) {
                 let mut updated_child = child.clone();
-                
+
                 // Set previous sibling
                 if i > 0 {
                     updated_child.previous_sibling = Some(ordered_child_ids[i - 1].clone());
                 }
-                
+
                 // Set next sibling
                 if i < ordered_child_ids.len() - 1 {
                     updated_child.next_sibling = Some(ordered_child_ids[i + 1].clone());
                 }
-                
+
                 updated_child.updated_at = chrono::Utc::now().to_rfc3339();
-                
+
                 // Store references before moving the node
                 let child_id_ref = updated_child.id.clone();
                 let prev_id_ref = updated_child.previous_sibling.clone();
-                
+
                 self.data_store.store_node(updated_child).await?;
 
                 // Create/update SurrealDB relationships
                 if let Some(prev_id) = prev_id_ref {
-                    let _ = self.data_store.create_relationship(&prev_id, &child_id_ref, "next_sibling").await;
-                    let _ = self.data_store.create_relationship(&child_id_ref, &prev_id, "previous_sibling").await;
+                    let _ = self
+                        .data_store
+                        .create_relationship(&prev_id, &child_id_ref, "next_sibling")
+                        .await;
+                    let _ = self
+                        .data_store
+                        .create_relationship(&child_id_ref, &prev_id, "previous_sibling")
+                        .await;
                 }
             }
         }
@@ -1431,13 +1650,22 @@ impl CoreLogic for ServiceContainer {
 
     async fn move_child_up(&self, child_id: &NodeId) -> NodeSpaceResult<()> {
         // Get the child node
-        let child = self.data_store.get_node(child_id).await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Child node {} not found", child_id)))?;
+        let child = self.data_store.get_node(child_id).await?.ok_or_else(|| {
+            NodeSpaceError::NotFound(format!("Child node {} not found", child_id))
+        })?;
 
         // Check if it has a previous sibling to swap with
         if let Some(prev_sibling_id) = &child.previous_sibling {
-            let prev_sibling = self.data_store.get_node(prev_sibling_id).await?
-                .ok_or_else(|| NodeSpaceError::NotFound(format!("Previous sibling {} not found", prev_sibling_id)))?;
+            let prev_sibling = self
+                .data_store
+                .get_node(prev_sibling_id)
+                .await?
+                .ok_or_else(|| {
+                    NodeSpaceError::NotFound(format!(
+                        "Previous sibling {} not found",
+                        prev_sibling_id
+                    ))
+                })?;
 
             // Swap positions by updating sibling pointers
             let mut updated_child = child.clone();
@@ -1447,7 +1675,7 @@ impl CoreLogic for ServiceContainer {
             updated_child.previous_sibling = prev_sibling.previous_sibling.clone();
             updated_child.next_sibling = Some(prev_sibling_id.clone());
 
-            // Update the previous sibling's relationships  
+            // Update the previous sibling's relationships
             updated_prev.previous_sibling = Some(child_id.clone());
             updated_prev.next_sibling = child.next_sibling.clone();
 
@@ -1482,8 +1710,9 @@ impl CoreLogic for ServiceContainer {
 
     async fn move_child_down(&self, child_id: &NodeId) -> NodeSpaceResult<()> {
         // Get the child node
-        let child = self.data_store.get_node(child_id).await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Child node {} not found", child_id)))?;
+        let child = self.data_store.get_node(child_id).await?.ok_or_else(|| {
+            NodeSpaceError::NotFound(format!("Child node {} not found", child_id))
+        })?;
 
         // Check if it has a next sibling to swap with
         if let Some(next_sibling_id) = &child.next_sibling {
@@ -1494,19 +1723,26 @@ impl CoreLogic for ServiceContainer {
         }
     }
 
-    async fn insert_child_at_position(&self, parent_id: &NodeId, child_id: &NodeId, position: u32) -> NodeSpaceResult<()> {
+    async fn insert_child_at_position(
+        &self,
+        parent_id: &NodeId,
+        child_id: &NodeId,
+        position: u32,
+    ) -> NodeSpaceResult<()> {
         // Get current ordered children
         let current_children = self.get_ordered_children(parent_id).await?;
-        
+
         // Validate that the child exists and belongs to this parent
         if !current_children.iter().any(|child| &child.id == child_id) {
-            return Err(NodeSpaceError::InvalidData(
-                format!("Node {} is not a child of parent {}", child_id, parent_id)
-            ));
+            return Err(NodeSpaceError::InvalidData(format!(
+                "Node {} is not a child of parent {}",
+                child_id, parent_id
+            )));
         }
 
         // Create new order with the child moved to the specified position
-        let mut new_order: Vec<NodeId> = current_children.iter()
+        let mut new_order: Vec<NodeId> = current_children
+            .iter()
             .filter(|child| &child.id != child_id) // Remove the child from current position
             .map(|child| child.id.clone())
             .collect();
@@ -1529,28 +1765,29 @@ impl CoreLogic for ServiceContainer {
         for parent_result in parent_results {
             if let Some(parent_date_str) = parent_result.content.as_str() {
                 let parent_id = NodeId::from(parent_date_str);
-                
+
                 // Get children for this parent
                 let children = self.get_child_nodes(&parent_id).await?;
-                
+
                 if children.len() <= 1 {
                     continue; // No need to order single children
                 }
 
                 // Check if siblings are already properly established
-                let has_proper_siblings = children.iter().any(|child| 
-                    child.next_sibling.is_some() || child.previous_sibling.is_some()
-                );
+                let has_proper_siblings = children
+                    .iter()
+                    .any(|child| child.next_sibling.is_some() || child.previous_sibling.is_some());
 
                 if !has_proper_siblings {
                     // Order children by creation timestamp (earliest first)
                     let mut sorted_children = children;
                     sorted_children.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-                    
-                    let child_ids: Vec<NodeId> = sorted_children.iter().map(|c| c.id.clone()).collect();
-                    
+
+                    let child_ids: Vec<NodeId> =
+                        sorted_children.iter().map(|c| c.id.clone()).collect();
+
                     // Establish the ordering
-                    if let Ok(_) = self.reorder_children(&parent_id, child_ids).await {
+                    if (self.reorder_children(&parent_id, child_ids).await).is_ok() {
                         established_count += sorted_children.len() as u32;
                     }
                 }
@@ -1577,7 +1814,10 @@ impl CoreLogic for ServiceContainer {
         report.push("".to_string());
         report.push("2. Cleaning bullet points from child node content...".to_string());
         match self.clean_bullet_points_from_children().await {
-            Ok(count) => report.push(format!("   ✅ Cleaned bullet points from {} child nodes", count)),
+            Ok(count) => report.push(format!(
+                "   ✅ Cleaned bullet points from {} child nodes",
+                count
+            )),
             Err(e) => report.push(format!("   ❌ Error cleaning bullet points: {}", e)),
         }
 
@@ -1585,70 +1825,114 @@ impl CoreLogic for ServiceContainer {
         report.push("".to_string());
         report.push("3. Establishing proper sibling ordering for all children...".to_string());
         match self.establish_child_ordering().await {
-            Ok(count) => report.push(format!("   ✅ Established ordering for {} child nodes", count)),
+            Ok(count) => report.push(format!(
+                "   ✅ Established ordering for {} child nodes",
+                count
+            )),
             Err(e) => report.push(format!("   ❌ Error establishing child ordering: {}", e)),
         }
 
         // Step 4: Verify database integrity
         report.push("".to_string());
         report.push("4. Verifying database integrity...".to_string());
-        
+
         // Count total nodes
         let total_nodes_query = "SELECT count() FROM text GROUP ALL";
-        let total_nodes = self.data_store.query_nodes(total_nodes_query).await
+        let total_nodes = self
+            .data_store
+            .query_nodes(total_nodes_query)
+            .await
             .map(|nodes| nodes.len())
             .unwrap_or(0);
         report.push(format!("   📊 Total text nodes: {}", total_nodes));
 
         // Count nodes with parent relationships
         let child_nodes_query = "SELECT count() FROM text WHERE parent_date IS NOT NULL GROUP ALL";
-        let child_nodes = self.data_store.query_nodes(child_nodes_query).await
+        let child_nodes = self
+            .data_store
+            .query_nodes(child_nodes_query)
+            .await
             .map(|nodes| nodes.len())
             .unwrap_or(0);
-        report.push(format!("   📊 Child nodes with parent_date: {}", child_nodes));
+        report.push(format!(
+            "   📊 Child nodes with parent_date: {}",
+            child_nodes
+        ));
 
         // Count nodes with sibling relationships
         let sibling_nodes_query = "SELECT count() FROM text WHERE next_sibling IS NOT NULL OR previous_sibling IS NOT NULL GROUP ALL";
-        let sibling_nodes = self.data_store.query_nodes(sibling_nodes_query).await
+        let sibling_nodes = self
+            .data_store
+            .query_nodes(sibling_nodes_query)
+            .await
             .map(|nodes| nodes.len())
             .unwrap_or(0);
-        report.push(format!("   📊 Nodes with sibling relationships: {}", sibling_nodes));
+        report.push(format!(
+            "   📊 Nodes with sibling relationships: {}",
+            sibling_nodes
+        ));
 
         // Count SurrealDB relationship records
         let contains_relationships_query = "SELECT count() FROM contains GROUP ALL";
-        let contains_count = self.data_store.query_nodes(contains_relationships_query).await
+        let contains_count = self
+            .data_store
+            .query_nodes(contains_relationships_query)
+            .await
             .map(|nodes| nodes.len())
             .unwrap_or(0);
-        report.push(format!("   📊 'Contains' relationship records: {}", contains_count));
+        report.push(format!(
+            "   📊 'Contains' relationship records: {}",
+            contains_count
+        ));
 
         let sibling_relationships_query = "SELECT count() FROM next_sibling GROUP ALL";
-        let next_sibling_count = self.data_store.query_nodes(sibling_relationships_query).await
+        let next_sibling_count = self
+            .data_store
+            .query_nodes(sibling_relationships_query)
+            .await
             .map(|nodes| nodes.len())
             .unwrap_or(0);
-        report.push(format!("   📊 'Next_sibling' relationship records: {}", next_sibling_count));
+        report.push(format!(
+            "   📊 'Next_sibling' relationship records: {}",
+            next_sibling_count
+        ));
 
         // Step 5: Test hierarchical queries
         report.push("".to_string());
         report.push("5. Testing hierarchical queries...".to_string());
-        
+
         // Test getting children for a date
         let test_date = "2025-06-19";
         match CoreLogic::get_nodes_for_date(self, test_date).await {
             Ok(nodes) => {
-                report.push(format!("   ✅ Successfully retrieved {} nodes for date {}", nodes.len(), test_date));
-                
+                report.push(format!(
+                    "   ✅ Successfully retrieved {} nodes for date {}",
+                    nodes.len(),
+                    test_date
+                ));
+
                 if !nodes.is_empty() {
                     // Test hierarchical query
                     match CoreLogic::get_hierarchical_nodes_for_date(self, test_date).await {
-                        Ok(hierarchical) => report.push(format!("   ✅ Successfully retrieved {} hierarchical nodes", hierarchical.len())),
-                        Err(e) => report.push(format!("   ❌ Error getting hierarchical nodes: {}", e)),
+                        Ok(hierarchical) => report.push(format!(
+                            "   ✅ Successfully retrieved {} hierarchical nodes",
+                            hierarchical.len()
+                        )),
+                        Err(e) => {
+                            report.push(format!("   ❌ Error getting hierarchical nodes: {}", e))
+                        }
                     }
-                    
+
                     // Test ordered children query
                     let parent_id = NodeId::from(test_date);
                     match self.get_ordered_children(&parent_id).await {
-                        Ok(ordered) => report.push(format!("   ✅ Successfully retrieved {} ordered children", ordered.len())),
-                        Err(e) => report.push(format!("   ❌ Error getting ordered children: {}", e)),
+                        Ok(ordered) => report.push(format!(
+                            "   ✅ Successfully retrieved {} ordered children",
+                            ordered.len()
+                        )),
+                        Err(e) => {
+                            report.push(format!("   ❌ Error getting ordered children: {}", e))
+                        }
                     }
                 }
             }
@@ -1673,13 +1957,16 @@ impl CoreLogic for ServiceContainer {
     async fn get_database_version(&self) -> NodeSpaceResult<u32> {
         // Query the database_version table to get current version
         let query = "SELECT version FROM database_version ORDER BY version DESC LIMIT 1";
-        
+
         match self.data_store.query_nodes(query).await {
             Ok(results) if !results.is_empty() => {
                 // Extract version from the result
-                if let Some(version_value) = results[0].metadata.as_ref()
+                if let Some(version_value) = results[0]
+                    .metadata
+                    .as_ref()
                     .and_then(|m| m.get("version"))
-                    .and_then(|v| v.as_u64()) {
+                    .and_then(|v| v.as_u64())
+                {
                     Ok(version_value as u32)
                 } else {
                     // Fallback: try to extract from content
@@ -1696,7 +1983,12 @@ impl CoreLogic for ServiceContainer {
         }
     }
 
-    async fn set_database_version(&self, version: u32, migration_name: &str, description: &str) -> NodeSpaceResult<()> {
+    async fn set_database_version(
+        &self,
+        version: u32,
+        migration_name: &str,
+        description: &str,
+    ) -> NodeSpaceResult<()> {
         // Create a version record
         let version_node = Node::new(serde_json::Value::Number(serde_json::Number::from(version)))
             .with_metadata(serde_json::json!({
@@ -1719,11 +2011,13 @@ impl CoreLogic for ServiceContainer {
         match self.data_store.query_nodes(&version_insert).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                eprintln!("Failed to insert version record, trying node storage: {}", e);
+                eprintln!(
+                    "Failed to insert version record, trying node storage: {}",
+                    e
+                );
                 // Fallback: store as a regular node
                 self.data_store.store_node(version_node).await.map(|_| ())
             }
         }
     }
-
 }

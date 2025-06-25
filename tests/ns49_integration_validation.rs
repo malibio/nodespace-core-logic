@@ -179,11 +179,21 @@ async fn test_content_processing_utilities() {
     use nodespace_core_logic::content_processing;
 
     // Test bullet point detection
-    assert!(content_processing::has_bullet_points("- This is a bullet point"));
-    assert!(content_processing::has_bullet_points("• Another bullet point"));
-    assert!(content_processing::has_bullet_points("* Third bullet point"));
-    assert!(content_processing::has_bullet_points("+ Fourth bullet point"));
-    assert!(!content_processing::has_bullet_points("No bullet points here"));
+    assert!(content_processing::has_bullet_points(
+        "- This is a bullet point"
+    ));
+    assert!(content_processing::has_bullet_points(
+        "• Another bullet point"
+    ));
+    assert!(content_processing::has_bullet_points(
+        "* Third bullet point"
+    ));
+    assert!(content_processing::has_bullet_points(
+        "+ Fourth bullet point"
+    ));
+    assert!(!content_processing::has_bullet_points(
+        "No bullet points here"
+    ));
 
     // Test bullet point cleaning
     let content_with_bullets = "- First item\n• Second item\n* Third item\nRegular text";
@@ -208,8 +218,10 @@ async fn test_bullet_point_cleaning_interface() {
 
     // Validate that the cleaning methods exist
     fn validate_cleaning_methods() {
-        let _clean_children = nodespace_core_logic::ServiceContainer::clean_bullet_points_from_children;
-        let _update_with_cleaning = nodespace_core_logic::ServiceContainer::update_node_with_cleaning;
+        let _clean_children =
+            nodespace_core_logic::ServiceContainer::clean_bullet_points_from_children;
+        let _update_with_cleaning =
+            nodespace_core_logic::ServiceContainer::update_node_with_cleaning;
     }
 
     validate_cleaning_methods();
@@ -218,4 +230,3 @@ async fn test_bullet_point_cleaning_interface() {
         "Bullet point cleaning interface validated for data migration"
     );
 }
-
