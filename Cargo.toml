@@ -17,3 +17,17 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[[example]]
+name = "fresh_sample_database"
+path = "examples/fresh_sample_database.rs"
+
+[[example]]
+name = "verify_sample_database"
+path = "examples/verify_sample_database.rs"
+
+[features]
+default = []
+real-ml = ["nodespace-nlp-engine/real-ml"]
+llama-cpp = ["nodespace-nlp-engine/llama-cpp"]
+cpu-only = ["nodespace-nlp-engine/cpu-only"]
