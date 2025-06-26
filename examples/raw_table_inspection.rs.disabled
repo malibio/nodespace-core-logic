@@ -1,0 +1,171 @@
+// Direct table inspection using raw SurrealDB queries
+use nodespace_data_store::SurrealDataStore;
+use std::error::Error;
+
+#[tokio::main] 
+async fn main() -> Result<(), Box<dyn Error>> {
+    println!("🔍 Direct table inspection using raw SurrealDB queries...\n");
+    
+    let database_path = "/Users/malibio/nodespace/nodespace-data-store/data/sample.db";
+    let data_store = SurrealDataStore::new(database_path).await?;
+    println!("✅ Direct data store connection established");
+
+    // Get raw count from each table using SurrealDB directly
+    println!("\n1. Checking table existence and counts...");
+    
+    // Check nodes table
+    let nodes_raw = data_store.db.query("SELECT count() FROM nodes GROUP ALL").await;
+    match nodes_raw {
+        Ok(mut result) => {
+            let count_value: Result<Vec<serde_json::Value>, _> = result.take(0);
+            match count_value {
+                Ok(values) => {
+                    if let Some(first) = values.first() {
+                        if let Some(count) = first.get("count") {
+                            println!("   'nodes' table count: {}", count);
+                        } else {
+                            println!("   'nodes' table: count field not found");
+                        }
+                    } else {
+                        println!("   'nodes' table: no results");
+                    }
+                }
+                Err(e) => println!("   'nodes' table error: {}", e),
+            }
+        }
+        Err(e) => println!("   'nodes' table query failed: {}", e),
+    }
+
+    // Check text table
+    let text_raw = data_store.db.query("SELECT count() FROM text GROUP ALL").await;
+    match text_raw {
+        Ok(mut result) => {
+            let count_value: Result<Vec<serde_json::Value>, _> = result.take(0);
+            match count_value {
+                Ok(values) => {
+                    if let Some(first) = values.first() {
+                        if let Some(count) = first.get("count") {
+                            println!("   'text' table count: {}", count);
+                        } else {
+                            println!("   'text' table: count field not found");
+                        }
+                    } else {
+                        println!("   'text' table: no results");
+                    }
+                }
+                Err(e) => println!("   'text' table error: {}", e),
+            }
+        }
+        Err(e) => println!("   'text' table query failed: {}", e),
+    }
+
+    // Check date table
+    let date_raw = data_store.db.query("SELECT count() FROM date GROUP ALL").await;
+    match date_raw {
+        Ok(mut result) => {
+            let count_value: Result<Vec<serde_json::Value>, _> = result.take(0);
+            match count_value {
+                Ok(values) => {
+                    if let Some(first) = values.first() {
+                        if let Some(count) = first.get("count") {
+                            println!("   'date' table count: {}", count);
+                        } else {
+                            println!("   'date' table: count field not found");
+                        }
+                    } else {
+                        println!("   'date' table: no results");
+                    }
+                }
+                Err(e) => println!("   'date' table error: {}", e),
+            }
+        }
+        Err(e) => println!("   'date' table query failed: {}", e),
+    }
+
+    // Check relationships table
+    let contains_raw = data_store.db.query("SELECT count() FROM contains GROUP ALL").await;
+    match contains_raw {
+        Ok(mut result) => {
+            let count_value: Result<Vec<serde_json::Value>, _> = result.take(0);
+            match count_value {
+                Ok(values) => {
+                    if let Some(first) = values.first() {
+                        if let Some(count) = first.get("count") {
+                            println!("   'contains' relationships count: {}", count);
+                        } else {
+                            println!("   'contains' relationships: count field not found");
+                        }
+                    } else {
+                        println!("   'contains' relationships: no results");
+                    }
+                }
+                Err(e) => println!("   'contains' relationships error: {}", e),
+            }
+        }
+        Err(e) => println!("   'contains' relationships query failed: {}", e),
+    }
+
+    // Sample a few records from nodes table
+    println!("\n2. Sampling nodes table...");
+    let nodes_sample = data_store.db.query("SELECT * FROM nodes LIMIT 3").await;
+    match nodes_sample {
+        Ok(mut result) => {
+            let sample_value: Result<Vec<serde_json::Value>, _> = result.take(0);
+            match sample_value {
+                Ok(values) => {
+                    println!("   Found {} sample records in nodes table", values.len());
+                    for (i, record) in values.iter().enumerate() {
+                        if let Some(content) = record.get("content") {
+                            let content_str = content.to_string();
+                            let preview = if content_str.len() > 80 {
+                                format!("{}...", &content_str[..77])
+                            } else {
+                                content_str
+                            };
+                            println!("     [{}] Content: {}", i + 1, preview);
+                        }
+                        if let Some(metadata) = record.get("metadata") {
+                            if let Some(parent_date) = metadata.get("parent_date") {
+                                println!("         Parent date: {}", parent_date);
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("   Error parsing nodes sample: {}", e),
+            }
+        }
+        Err(e) => println!("   Error sampling nodes: {}", e),
+    }
+
+    // Check for specific marketing date
+    println!("\n3. Checking for marketing data on 2025-01-02...");
+    let specific_date_query = r#"SELECT * FROM nodes WHERE metadata.parent_date = "2025-01-02" LIMIT 3"#;
+    let specific_date_raw = data_store.db.query(specific_date_query).await;
+    match specific_date_raw {
+        Ok(mut result) => {
+            let date_value: Result<Vec<serde_json::Value>, _> = result.take(0);
+            match date_value {
+                Ok(values) => {
+                    println!("   Found {} records for 2025-01-02 in nodes table", values.len());
+                    for (i, record) in values.iter().take(2).enumerate() {
+                        if let Some(content) = record.get("content") {
+                            let content_str = content.to_string();
+                            let preview = if content_str.len() > 60 {
+                                format!("{}...", &content_str[..57])
+                            } else {
+                                content_str
+                            };
+                            println!("     [{}] {}", i + 1, preview);
+                        }
+                    }
+                }
+                Err(e) => println!("   Error parsing date records: {}", e),
+            }
+        }
+        Err(e) => println!("   Error querying specific date: {}", e),
+    }
+
+    println!("\n💡 This should reveal where the marketing data actually is!");
+
+    Ok(())
+}

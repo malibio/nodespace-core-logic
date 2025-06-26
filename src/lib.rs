@@ -758,73 +758,65 @@ impl DateNavigation for ServiceContainer {
         let mut hierarchical_nodes = Vec::new();
         let mut processed_node_ids = std::collections::HashSet::new();
 
-        for node in nodes {
-            // Skip if we've already processed this node as a child
+        // First, create the root date node
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let date_node_id = NodeId::from(date_str.clone());
+        
+        // Create a virtual date node for the hierarchy
+        let date_node = Node::with_id(
+            date_node_id.clone(),
+            serde_json::Value::String(format!("{}", date.format("%A, %B %d, %Y")))
+        );
+        
+        // Collect all child node IDs for the date node
+        let child_ids: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+        
+        // Add the date node as the root of the hierarchy
+        hierarchical_nodes.push(HierarchicalNode {
+            node: date_node,
+            children: child_ids,
+            parent: None,
+            depth_level: 0,
+            order_in_parent: 0,
+            relationship_type: None,
+        });
+        processed_node_ids.insert(date_node_id.clone());
+
+        // Now process each text node as a child of the date node
+        for (index, node) in nodes.into_iter().enumerate() {
+            // Skip if we've already processed this node
             if processed_node_ids.contains(&node.id) {
                 continue;
             }
 
-            // Determine parent relationship from metadata or node structure
-            let (parent, relationship_type) = if let Some(metadata) = &node.metadata {
-                if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
-                    // This node has a parent date relationship
-                    (
-                        Some(NodeId::from(parent_date)),
-                        Some("contains".to_string()),
-                    )
-                } else if let Some(parent_id) = metadata.get("parent_id").and_then(|v| v.as_str()) {
-                    // This node has a generic parent relationship
-                    (
-                        Some(NodeId::from(parent_id)),
-                        metadata
-                            .get("relationship_type")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
-                    )
-                } else {
-                    // No parent metadata found
-                    (None, None)
-                }
-            } else {
-                // No metadata, check if this node has sibling relationships indicating it's part of a hierarchy
-                if node.next_sibling.is_some() || node.previous_sibling.is_some() {
-                    // This node has siblings, so it likely has a parent, but we can't determine it from metadata
-                    // We'll need to query the data store for this information
-                    (None, None)
-                } else {
-                    // Standalone node
-                    (None, None)
-                }
-            };
+            // All nodes returned by get_nodes_for_date are children of this date
+            let parent = Some(date_node_id.clone());
+            let relationship_type = Some("contains".to_string());
+            let depth_level = 1; // All text nodes are at depth 1 under the date node
 
-            // Determine depth level based on parent relationship
-            let depth_level = if parent.is_some() { 1 } else { 0 };
-
-            // Get children for this node
+            // Get children for this text node (if any)
             let child_nodes: Vec<Node> = self.get_child_nodes(&node.id).await.unwrap_or_default();
-
             let child_ids: Vec<NodeId> = child_nodes.iter().map(|n| n.id.clone()).collect();
 
-            // Add the parent node to hierarchical structure
-            let order_in_parent = hierarchical_nodes.len() as u32;
+            // Add this text node to hierarchical structure
             hierarchical_nodes.push(HierarchicalNode {
                 node: node.clone(),
                 children: child_ids.clone(),
-                parent: parent.clone(),
+                parent,
                 depth_level,
-                order_in_parent,
-                relationship_type: relationship_type.clone(),
+                order_in_parent: index as u32,
+                relationship_type,
             });
             processed_node_ids.insert(node.id.clone());
 
-            // Add each child node to hierarchical structure
+            // Add each child node to hierarchical structure (depth 2)
             for (child_index, child_node) in child_nodes.into_iter().enumerate() {
                 if !processed_node_ids.contains(&child_node.id) {
                     hierarchical_nodes.push(HierarchicalNode {
                         node: child_node.clone(),
-                        children: Vec::new(), // Children don't have sub-children in this flat structure
+                        children: Vec::new(), // Assuming no deeper nesting for now
                         parent: Some(node.id.clone()),
-                        depth_level: depth_level + 1,
+                        depth_level: 2,
                         order_in_parent: child_index as u32,
                         relationship_type: Some("contains".to_string()),
                     });
@@ -974,60 +966,18 @@ impl CoreLogic for ServiceContainer {
         // Process content for child nodes: clean bullet points and support markdown
         let processed_content = crate::content_processing::process_child_content(content);
 
-        // Generate embedding using the processed content
+        // CRITICAL FIX: Use the data store's specialized create_text_node method
+        // This ensures proper storage in the 'text' table and correct relationship creation
+        let node_id = self.data_store.create_text_node(&processed_content, Some(date)).await?;
+
+        // Generate embedding for the created node and update it
         let embedding = self
             .nlp_engine
             .generate_embedding(&processed_content)
             .await?;
 
-        // Create node with processed content and metadata
-        let mut node = Node::new(serde_json::Value::String(processed_content))
-            .with_metadata(serde_json::json!({"parent_date": date}));
-
-        let node_id = node.id.clone();
-        let parent_id = NodeId::from(date);
-
-        // Find the current last child to append this new child to the end of sibling chain
-        let existing_children = self
-            .get_ordered_children(&parent_id)
-            .await
-            .unwrap_or_default();
-
-        if let Some(last_child) = existing_children.last() {
-            // Set this new node as the next sibling of the current last child
-            node.previous_sibling = Some(last_child.id.clone());
-
-            // Update the previous last child to point to this new node
-            if let Ok(Some(mut last_child_node)) = self.data_store.get_node(&last_child.id).await {
-                last_child_node.next_sibling = Some(node_id.clone());
-                last_child_node.updated_at = chrono::Utc::now().to_rfc3339();
-                let _ = self.data_store.store_node(last_child_node).await;
-
-                // Create the SurrealDB relationship
-                let _ = self
-                    .data_store
-                    .create_relationship(&last_child.id, &node_id, "next_sibling")
-                    .await;
-                let _ = self
-                    .data_store
-                    .create_relationship(&node_id, &last_child.id, "previous_sibling")
-                    .await;
-            }
-        }
-
-        // Store node with embedding using the data store's method
-        self.data_store
-            .store_node_with_embedding(node, embedding)
-            .await?;
-
-        // CRITICAL FIX: Establish parent-child relationship using our validated add_child_node method
-        match self.add_child_node(&parent_id, &node_id).await {
-            Ok(_) => {}
-            Err(_e) => {
-                // Don't fail the entire operation - the node was created successfully
-                // The relationship can be established later via migration
-            }
-        }
+        // Update the node with the embedding
+        self.data_store.update_node_embedding(&node_id, embedding).await?;
 
         Ok(node_id)
     }
@@ -1193,58 +1143,23 @@ impl CoreLogic for ServiceContainer {
             }
             Ok(nodes)
         } else {
-            // For non-date nodes, use SurrealDB 2.x relationship traversal
+            // For text nodes, query where this text node is the parent
             let clean_id = parent_id.as_str().replace("-", "_");
-
-            // Multi-table approach: Try traversal across all possible node table types
-            // This prepares for TaskNode and other future node types
-
-            let table_types = vec!["text", "task", "nodes"]; // Add more types as needed
-            let mut found_children = Vec::new();
-
-            for table_type in &table_types {
-                // SurrealDB 2.x SOLUTION: Use relationship traversal to get child nodes
-                let traversal_query =
-                    format!("SELECT * FROM {}:{}->contains", table_type, clean_id);
-
-                match self.data_store.query_nodes(&traversal_query).await {
-                    Ok(relations) if !relations.is_empty() => {
-                        for rel_record in relations {
-                            // Process the relationship traversal results
-                            if let Some(metadata) = &rel_record.metadata {
-                                if let Some(out_value) = metadata.get("out") {
-                                    // Parse the fetched child node from the 'out' field
-                                    if let Ok(child_node) =
-                                        serde_json::from_value::<Node>(out_value.clone())
-                                    {
-                                        if !child_node.content.is_null() {
-                                            let _content_preview = child_node
-                                                .content
-                                                .as_str()
-                                                .map(|s| {
-                                                    if s.len() > 40 {
-                                                        format!("{}...", &s[..37])
-                                                    } else {
-                                                        s.to_string()
-                                                    }
-                                                })
-                                                .unwrap_or_else(|| "NULL".to_string());
-                                            found_children.push(child_node);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            let parent_thing = format!("text:{}", clean_id);
+            
+            // Query relationships where this text node is the parent
+            let traversal_query = format!("SELECT * FROM {}->contains->text", parent_thing);
+            
+            match self.data_store.query_nodes(&traversal_query).await {
+                Ok(child_nodes) => Ok(child_nodes),
+                Err(_) => {
+                    // If no direct children found, check if any text nodes have this as parent
+                    let reverse_query = format!("SELECT * FROM text WHERE parent_id = '{}'", parent_id.as_str());
+                    match self.data_store.query_nodes(&reverse_query).await {
+                        Ok(nodes) => Ok(nodes),
+                        Err(_) => Ok(Vec::new())
                     }
-                    Ok(_) => {}
-                    Err(_e) => {}
                 }
-            }
-
-            if !found_children.is_empty() {
-                Ok(found_children)
-            } else {
-                Ok(Vec::new())
             }
         }
     }

@@ -31,6 +31,10 @@ path = "examples/simple_hierarchical_test.rs"
 name = "test_delete_node"
 path = "examples/test_delete_node.rs"
 
+[[example]]
+name = "test_hierarchical_fix"
+path = "examples/test_hierarchical_fix.rs"
+
 
 [features]
 default = []
