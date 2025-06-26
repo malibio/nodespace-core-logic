@@ -25,6 +25,124 @@ pub struct DateNode {
     pub child_count: usize,
 }
 
+/// Chat message for conversation context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: String,
+    pub session_id: String,
+    pub content: String,
+    pub role: MessageRole,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub sequence_number: u32,
+    pub rag_context: Option<RAGMessageContext>,
+}
+
+/// Message roles in conversation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+}
+
+/// RAG context metadata for message transparency
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RAGMessageContext {
+    pub sources_used: Vec<NodeId>,
+    pub retrieval_score: f32,
+    pub context_tokens: usize,
+    pub generation_time_ms: u64,
+    pub knowledge_summary: String,
+}
+
+/// Configuration for RAG operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RAGConfig {
+    pub max_retrieval_results: usize,     // Default: 5
+    pub relevance_threshold: f32,         // Default: 0.7
+    pub max_context_tokens: usize,        // Default: 2048
+    pub conversation_context_limit: usize, // Default: 5 messages
+    pub reserved_response_tokens: usize,  // Default: 512
+}
+
+impl Default for RAGConfig {
+    fn default() -> Self {
+        Self {
+            max_retrieval_results: 5,
+            relevance_threshold: 0.7,
+            max_context_tokens: 2048,
+            conversation_context_limit: 5,
+            reserved_response_tokens: 512,
+        }
+    }
+}
+
+/// Token budget management for conversation context
+#[derive(Debug, Clone)]
+pub struct TokenBudget {
+    pub total_available: usize,        // Model's context window
+    pub reserved_for_response: usize,  // 512 tokens for response
+    pub conversation_history: usize,   // Recent chat context
+    pub knowledge_context: usize,      // Retrieved information
+    pub system_prompt: usize,          // Instructions
+}
+
+impl TokenBudget {
+    pub fn new(total_tokens: usize, reserved_response: usize) -> Self {
+        Self {
+            total_available: total_tokens,
+            reserved_for_response: reserved_response,
+            conversation_history: 0,
+            knowledge_context: 0,
+            system_prompt: 150, // Approximate system prompt size
+        }
+    }
+
+    pub fn available_for_context(&self) -> usize {
+        self.total_available
+            .saturating_sub(self.reserved_for_response)
+            .saturating_sub(self.system_prompt)
+    }
+
+    pub fn allocate_conversation_tokens(&mut self, tokens: usize) {
+        self.conversation_history = tokens;
+    }
+
+    pub fn allocate_knowledge_tokens(&mut self, tokens: usize) {
+        self.knowledge_context = tokens;
+    }
+
+    pub fn tokens_used(&self) -> usize {
+        self.conversation_history + self.knowledge_context + self.system_prompt
+    }
+
+    pub fn tokens_remaining(&self) -> usize {
+        self.total_available.saturating_sub(self.tokens_used() + self.reserved_for_response)
+    }
+}
+
+/// Enhanced RAG response with conversation support
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RAGResponse {
+    pub answer: String,
+    pub sources: Vec<Node>,
+    pub context_summary: String,
+    pub relevance_score: f32,
+    pub context_tokens: usize,
+    pub generation_time_ms: u64,
+    pub conversation_context_used: usize,
+}
+
+/// RAG query request with conversation context
+#[derive(Debug, Clone)]
+pub struct RAGQueryRequest {
+    pub query: String,
+    pub session_id: String,
+    pub conversation_history: Vec<ChatMessage>,
+    pub date_scope: Option<String>,
+    pub max_results: Option<usize>,
+}
+
 /// Date navigation operations interface
 #[async_trait]
 pub trait DateNavigation: Send + Sync {
@@ -241,6 +359,7 @@ pub struct ServiceContainer {
     nlp_engine: LocalNLPEngine,
     #[allow(dead_code)]
     config: NodeSpaceConfig,
+    rag_config: RAGConfig,
     state: Arc<RwLock<ServiceState>>,
 }
 
@@ -279,6 +398,7 @@ impl ServiceContainer {
             data_store,
             nlp_engine,
             config,
+            rag_config: RAGConfig::default(),
             state,
         })
     }
@@ -308,6 +428,48 @@ impl ServiceContainer {
         let mut state = self.state.write().await;
         *state = ServiceState::Uninitialized;
         Ok(())
+    }
+
+    /// Convenience method: Process a simple query without conversation context
+    pub async fn process_simple_query(&self, query: &str) -> NodeSpaceResult<RAGResponse> {
+        let request = RAGQueryRequest {
+            query: query.to_string(),
+            session_id: "simple".to_string(),
+            conversation_history: Vec::new(),
+            date_scope: None,
+            max_results: None,
+        };
+        
+        RAGService::process_rag_query(self, request).await
+    }
+
+    /// Convenience method: Process a query with conversation context
+    pub async fn process_conversation_query(
+        &self,
+        query: &str,
+        session_id: &str,
+        conversation_history: Vec<ChatMessage>,
+        date_scope: Option<String>,
+    ) -> NodeSpaceResult<RAGResponse> {
+        let request = RAGQueryRequest {
+            query: query.to_string(),
+            session_id: session_id.to_string(),
+            conversation_history,
+            date_scope,
+            max_results: None,
+        };
+        
+        RAGService::process_rag_query(self, request).await
+    }
+
+    /// Get RAG configuration
+    pub fn get_rag_config(&self) -> &RAGConfig {
+        &self.rag_config
+    }
+
+    /// Update RAG configuration
+    pub fn update_rag_config(&mut self, config: RAGConfig) {
+        self.rag_config = config;
     }
 }
 
@@ -480,6 +642,39 @@ pub trait CoreLogic: Send + Sync {
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>>;
 }
 
+/// Enhanced RAG orchestration service for AIChatNode functionality
+#[async_trait]
+pub trait RAGService: Send + Sync {
+    /// Process RAG query with conversation context
+    async fn process_rag_query(&self, request: RAGQueryRequest) -> NodeSpaceResult<RAGResponse>;
+
+    /// Semantic search with conversation context awareness
+    async fn semantic_search_with_context(
+        &self,
+        query: &str,
+        conversation_context: &[ChatMessage],
+        date_scope: Option<&str>,
+        max_results: usize,
+    ) -> NodeSpaceResult<Vec<(Node, f32)>>;
+
+    /// Assemble RAG context from retrieved nodes and conversation history
+    async fn assemble_rag_context(
+        &self,
+        retrieved_nodes: Vec<(Node, f32)>,
+        conversation_history: &[ChatMessage],
+        current_query: &str,
+        config: &RAGConfig,
+    ) -> NodeSpaceResult<(String, TokenBudget, Vec<Node>)>;
+
+    /// Manage token budget for conversation context
+    fn calculate_token_budget(
+        &self,
+        conversation_history: &[ChatMessage],
+        retrieved_nodes: &[(Node, f32)],
+        config: &RAGConfig,
+    ) -> TokenBudget;
+}
+
 /// Search result with relevance scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -546,32 +741,16 @@ impl CoreLogic for ServiceContainer {
     }
 
     async fn process_query(&self, query: &str) -> NodeSpaceResult<QueryResponse> {
-        // Full RAG pipeline: search + LLM generation
-        let search_results = self.semantic_search(query, 5).await?;
+        // Use the enhanced RAG pipeline but convert to legacy QueryResponse format
+        let rag_response = self.process_simple_query(query).await?;
 
-        let context: Vec<String> = search_results
+        // Extract source IDs from the enhanced response
+        let sources: Vec<NodeId> = rag_response.sources
             .iter()
-            .filter_map(|result| result.node.content.as_str().map(|s| s.to_string()))
+            .map(|node| node.id.clone())
             .collect();
 
-        let sources: Vec<NodeId> = search_results
-            .iter()
-            .map(|result| result.node_id.clone())
-            .collect();
-
-        let context_text = context.join("\n\n");
-        let prompt = if context_text.is_empty() {
-            format!("Answer this question based on general knowledge: {}", query)
-        } else {
-            format!(
-                "Based on the following context, answer the question: {}\n\nContext:\n{}",
-                query, context_text
-            )
-        };
-
-        let answer = self.nlp_engine.generate_text(&prompt).await?;
-        let confidence = if context.is_empty() { 0.3 } else { 0.8 };
-
+        // Generate related queries (keep original logic for compatibility)
         let related_queries = vec![
             format!(
                 "What else about {}?",
@@ -587,10 +766,11 @@ impl CoreLogic for ServiceContainer {
             ),
         ];
 
+        // Convert enhanced RAG response to legacy format
         Ok(QueryResponse {
-            answer,
+            answer: rag_response.answer,
             sources,
-            confidence,
+            confidence: rag_response.relevance_score,
             related_queries,
         })
     }
@@ -681,5 +861,241 @@ impl CoreLogic for ServiceContainer {
 
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
         self.data_store.get_node(node_id).await
+    }
+}
+
+/// Enhanced RAG orchestration implementation for ServiceContainer
+#[async_trait]
+impl RAGService for ServiceContainer {
+    async fn process_rag_query(&self, request: RAGQueryRequest) -> NodeSpaceResult<RAGResponse> {
+        let start_time = std::time::Instant::now();
+
+        // 1. Context-aware semantic search
+        let retrieved_nodes = self
+            .semantic_search_with_context(
+                &request.query,
+                &request.conversation_history,
+                request.date_scope.as_deref(),
+                request.max_results.unwrap_or(self.rag_config.max_retrieval_results),
+            )
+            .await?;
+
+        // 2. Assemble RAG context with token management
+        let (context_prompt, token_budget, sources) = self
+            .assemble_rag_context(
+                retrieved_nodes,
+                &request.conversation_history,
+                &request.query,
+                &self.rag_config,
+            )
+            .await?;
+
+        // 3. Generate AI response
+        let answer = self.nlp_engine.generate_text(&context_prompt).await?;
+
+        let generation_time_ms = start_time.elapsed().as_millis() as u64;
+
+        // 4. Create comprehensive response
+        let relevance_score = if sources.is_empty() { 0.0 } else { 0.8 };
+        let context_summary = if sources.is_empty() {
+            "No relevant knowledge sources found".to_string()
+        } else {
+            format!("Used {} knowledge sources from your notes", sources.len())
+        };
+
+        Ok(RAGResponse {
+            answer,
+            sources,
+            context_summary,
+            relevance_score,
+            context_tokens: token_budget.tokens_used(),
+            generation_time_ms,
+            conversation_context_used: token_budget.conversation_history,
+        })
+    }
+
+    async fn semantic_search_with_context(
+        &self,
+        query: &str,
+        conversation_context: &[ChatMessage],
+        date_scope: Option<&str>,
+        max_results: usize,
+    ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+        // Enhance query with conversation context
+        let enhanced_query = if conversation_context.is_empty() {
+            query.to_string()
+        } else {
+            // Get recent context from conversation
+            let recent_context: Vec<String> = conversation_context
+                .iter()
+                .rev()
+                .take(3)
+                .filter_map(|msg| {
+                    if msg.role == MessageRole::User {
+                        Some(msg.content.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if recent_context.is_empty() {
+                query.to_string()
+            } else {
+                format!("{}\n\nRecent conversation context: {}", query, recent_context.join("; "))
+            }
+        };
+
+        // Perform semantic search
+        let search_results = self.semantic_search(&enhanced_query, max_results).await?;
+
+        // Filter by date scope if provided
+        let filtered_results: Vec<(Node, f32)> = if let Some(date_filter) = date_scope {
+            search_results
+                .into_iter()
+                .filter(|result| {
+                    if let Some(metadata) = &result.node.metadata {
+                        if let Some(parent_date) = metadata.get("parent_date") {
+                            parent_date.as_str() == Some(date_filter)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .map(|result| (result.node, result.score))
+                .collect()
+        } else {
+            search_results
+                .into_iter()
+                .map(|result| (result.node, result.score))
+                .collect()
+        };
+
+        // Apply relevance threshold
+        let relevant_results: Vec<(Node, f32)> = filtered_results
+            .into_iter()
+            .filter(|(_, score)| *score >= self.rag_config.relevance_threshold)
+            .collect();
+
+        Ok(relevant_results)
+    }
+
+    async fn assemble_rag_context(
+        &self,
+        retrieved_nodes: Vec<(Node, f32)>,
+        conversation_history: &[ChatMessage],
+        current_query: &str,
+        config: &RAGConfig,
+    ) -> NodeSpaceResult<(String, TokenBudget, Vec<Node>)> {
+        // Calculate token budget
+        let mut token_budget = self.calculate_token_budget(conversation_history, &retrieved_nodes, config);
+
+        // Prioritize and truncate sources to fit budget
+        let mut selected_sources = Vec::new();
+        let mut knowledge_tokens = 0;
+        
+        for (node, _score) in retrieved_nodes.iter() {
+            if let Some(content) = node.content.as_str() {
+                let estimated_tokens = content.len() / 4; // Rough token estimation
+                if knowledge_tokens + estimated_tokens <= token_budget.available_for_context() / 2 {
+                    selected_sources.push(node.clone());
+                    knowledge_tokens += estimated_tokens;
+                } else {
+                    break; // Stop when we hit budget limit
+                }
+            }
+        }
+
+        token_budget.allocate_knowledge_tokens(knowledge_tokens);
+
+        // Build conversation context within remaining budget
+        let remaining_tokens = token_budget.available_for_context() - knowledge_tokens;
+        let recent_messages: Vec<&ChatMessage> = conversation_history
+            .iter()
+            .rev()
+            .take(config.conversation_context_limit)
+            .take_while(|msg| {
+                let estimated_tokens = msg.content.len() / 4;
+                estimated_tokens <= remaining_tokens
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        let conversation_tokens: usize = recent_messages.iter().map(|msg| msg.content.len() / 4).sum();
+        token_budget.allocate_conversation_tokens(conversation_tokens);
+
+        // Assemble the final prompt
+        let mut prompt_parts = Vec::new();
+
+        // System prompt
+        prompt_parts.push("You are a helpful AI assistant that answers questions based on the user's knowledge base and conversation context.".to_string());
+
+        // Add conversation context if available
+        if !recent_messages.is_empty() {
+            prompt_parts.push("\n\n## Recent Conversation:".to_string());
+            for msg in recent_messages {
+                let role = match msg.role {
+                    MessageRole::User => "User",
+                    MessageRole::Assistant => "Assistant",
+                    MessageRole::System => "System",
+                };
+                prompt_parts.push(format!("{}: {}", role, msg.content));
+            }
+        }
+
+        // Add knowledge context if available
+        if !selected_sources.is_empty() {
+            prompt_parts.push("\n\n## Relevant Knowledge:".to_string());
+            for (i, source) in selected_sources.iter().enumerate() {
+                if let Some(content) = source.content.as_str() {
+                    prompt_parts.push(format!("Source {}: {}", i + 1, content));
+                }
+            }
+        }
+
+        // Add the current query
+        prompt_parts.push(format!("\n\n## Current Question:\n{}", current_query));
+
+        // Final instruction
+        prompt_parts.push("\n\nPlease provide a helpful response based on the above context and conversation history.".to_string());
+
+        let final_prompt = prompt_parts.join("\n");
+
+        Ok((final_prompt, token_budget, selected_sources))
+    }
+
+    fn calculate_token_budget(
+        &self,
+        conversation_history: &[ChatMessage],
+        retrieved_nodes: &[(Node, f32)],
+        config: &RAGConfig,
+    ) -> TokenBudget {
+        // Use model's context window from performance config or default
+        let total_tokens = self.config.performance_config.context_window.unwrap_or(4096);
+        let reserved_tokens = config.reserved_response_tokens;
+
+        let mut budget = TokenBudget::new(total_tokens, reserved_tokens);
+
+        // Estimate conversation tokens
+        let conversation_tokens: usize = conversation_history
+            .iter()
+            .map(|msg| msg.content.len() / 4) // Rough token estimation
+            .sum();
+        
+        // Estimate knowledge tokens
+        let knowledge_tokens: usize = retrieved_nodes
+            .iter()
+            .filter_map(|(node, _)| node.content.as_str())
+            .map(|content| content.len() / 4)
+            .sum();
+
+        budget.allocate_conversation_tokens(conversation_tokens.min(budget.available_for_context() / 2));
+        budget.allocate_knowledge_tokens(knowledge_tokens.min(budget.available_for_context() / 2));
+
+        budget
     }
 }
