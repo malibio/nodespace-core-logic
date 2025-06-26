@@ -27,6 +27,10 @@ path = "examples/fresh_sample_database.rs"
 name = "simple_hierarchical_test"
 path = "examples/simple_hierarchical_test.rs"
 
+[[example]]
+name = "test_delete_node"
+path = "examples/test_delete_node.rs"
+
 
 [features]
 default = []

@@ -940,6 +940,9 @@ pub trait CoreLogic: Send + Sync {
         migration_name: &str,
         description: &str,
     ) -> NodeSpaceResult<()>;
+
+    /// Delete a node and its relationships
+    async fn delete_node(&self, node_id: &NodeId) -> NodeSpaceResult<()>;
 }
 
 /// Search result with relevance scoring
@@ -2019,5 +2022,80 @@ impl CoreLogic for ServiceContainer {
                 self.data_store.store_node(version_node).await.map(|_| ())
             }
         }
+    }
+
+    async fn delete_node(&self, node_id: &NodeId) -> NodeSpaceResult<()> {
+        // First, verify the node exists
+        let node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        // Get all children to update their parent relationships
+        let children = self.get_child_nodes(node_id).await.unwrap_or_default();
+        
+        // Remove parent reference from all child nodes
+        for child in children {
+            let mut updated_child = child;
+            
+            // Clear parent-related metadata
+            if let Some(metadata) = updated_child.metadata.as_mut() {
+                if let Some(metadata_obj) = metadata.as_object_mut() {
+                    metadata_obj.remove("parent_date");
+                    metadata_obj.remove("parent_id");
+                }
+            }
+            
+            updated_child.updated_at = chrono::Utc::now().to_rfc3339();
+            let _ = self.data_store.store_node(updated_child).await;
+        }
+
+        // Handle sibling relationships - connect siblings to each other
+        if let (Some(prev_sibling_id), Some(next_sibling_id)) = (&node.previous_sibling, &node.next_sibling) {
+            // Connect previous sibling to next sibling
+            if let Ok(Some(mut prev_sibling)) = self.data_store.get_node(prev_sibling_id).await {
+                prev_sibling.next_sibling = Some(next_sibling_id.clone());
+                prev_sibling.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = self.data_store.store_node(prev_sibling).await;
+            }
+            
+            // Connect next sibling to previous sibling
+            if let Ok(Some(mut next_sibling)) = self.data_store.get_node(next_sibling_id).await {
+                next_sibling.previous_sibling = Some(prev_sibling_id.clone());
+                next_sibling.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = self.data_store.store_node(next_sibling).await;
+            }
+        } else if let Some(prev_sibling_id) = &node.previous_sibling {
+            // Clear next sibling reference from previous sibling
+            if let Ok(Some(mut prev_sibling)) = self.data_store.get_node(prev_sibling_id).await {
+                prev_sibling.next_sibling = None;
+                prev_sibling.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = self.data_store.store_node(prev_sibling).await;
+            }
+        } else if let Some(next_sibling_id) = &node.next_sibling {
+            // Clear previous sibling reference from next sibling
+            if let Ok(Some(mut next_sibling)) = self.data_store.get_node(next_sibling_id).await {
+                next_sibling.previous_sibling = None;
+                next_sibling.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = self.data_store.store_node(next_sibling).await;
+            }
+        }
+
+        // Delete SurrealDB relationships where this node is involved
+        let clean_id = node_id.as_str().replace("-", "_");
+        
+        // Delete outgoing relationships
+        let delete_outgoing = format!("DELETE FROM text:{}->*", clean_id);
+        let _ = self.data_store.query_nodes(&delete_outgoing).await;
+        
+        // Delete incoming relationships  
+        let delete_incoming = format!("DELETE FROM *->text:{}", clean_id);
+        let _ = self.data_store.query_nodes(&delete_incoming).await;
+
+        // Finally, delete the node itself
+        self.data_store.delete_node(node_id).await?;
+
+        Ok(())
     }
 }
