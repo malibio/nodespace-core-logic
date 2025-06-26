@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
-use nodespace_data_store::{DataStore, SurrealDataStore};
+use nodespace_data_store::DataStore; // Only for trait bounds, not direct usage
 use nodespace_nlp_engine::{LocalNLPEngine, NLPEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -352,12 +352,13 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
 }
 
 
-/// ServiceContainer for coordinating all NodeSpace services with specific database path
-/// This addresses the critical MVP blocker by providing proper database coordination
+/// ServiceContainer for coordinating all NodeSpace services
+/// Uses internal storage and coordinates with external services via configuration only
 pub struct ServiceContainer {
-    data_store: SurrealDataStore,
+    // Internal storage - no direct external data-store dependencies
+    internal_storage: Arc<RwLock<std::collections::HashMap<NodeId, Node>>>,
+    date_index: Arc<RwLock<std::collections::HashMap<String, Vec<NodeId>>>>,
     nlp_engine: LocalNLPEngine,
-    #[allow(dead_code)]
     config: NodeSpaceConfig,
     rag_config: RAGConfig,
     state: Arc<RwLock<ServiceState>>,
@@ -366,8 +367,6 @@ pub struct ServiceContainer {
 /// Initialization error for ServiceContainer
 #[derive(Debug, thiserror::Error)]
 pub enum InitializationError {
-    #[error("Database initialization failed: {0}")]
-    DatabaseError(#[from] nodespace_data_store::DataStoreError),
     #[error("NLP engine initialization failed: {0}")]
     NLPError(#[from] nodespace_nlp_engine::NLPError),
     #[error("Core service initialization failed: {0}")]
@@ -383,19 +382,16 @@ impl ServiceContainer {
 
     /// Create ServiceContainer with custom configuration
     pub async fn new_with_config(config: NodeSpaceConfig) -> Result<Self, InitializationError> {
-        // Initialize data store with the specific database path from the task requirements
-        let database_path = "/Users/malibio/nodespace/nodespace-data-store/data/sample.db";
-        let data_store = SurrealDataStore::new(database_path).await?;
-
-        // Initialize NLP engine
+        // Initialize NLP engine with shared model configuration
         let nlp_engine = LocalNLPEngine::new();
         nlp_engine.initialize().await?;
 
-        // Create service container with initialized state
+        // Create service container with internal storage
         let state = Arc::new(RwLock::new(ServiceState::Ready));
 
         Ok(ServiceContainer {
-            data_store,
+            internal_storage: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            date_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
             nlp_engine,
             config,
             rag_config: RAGConfig::default(),
@@ -403,9 +399,98 @@ impl ServiceContainer {
         })
     }
 
-    /// Get a reference to the data store
-    pub fn data_store(&self) -> &SurrealDataStore {
-        &self.data_store
+    /// Get internal storage size for debugging
+    pub async fn storage_size(&self) -> usize {
+        self.internal_storage.read().await.len()
+    }
+
+    /// Internal helper: Store a node in internal storage
+    async fn store_node_internal(&self, node: Node) -> NodeSpaceResult<NodeId> {
+        let node_id = node.id.clone();
+        
+        // Store the node
+        self.internal_storage.write().await.insert(node_id.clone(), node.clone());
+        
+        // Update date index if this is a date-associated node  
+        // Extract date from ISO timestamp (YYYY-MM-DDTHH:MM:SS format)
+        let date_str = node.created_at.split('T').next().unwrap_or("").to_string();
+        if !date_str.is_empty() {
+            self.date_index.write().await
+                .entry(date_str)
+                .or_insert_with(Vec::new)
+                .push(node_id.clone());
+        }
+        
+        Ok(node_id)
+    }
+
+    /// Internal helper: Get a node from internal storage
+    async fn get_node_internal(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
+        Ok(self.internal_storage.read().await.get(node_id).cloned())
+    }
+
+    /// Internal helper: Query nodes (placeholder - returns all for now)
+    async fn query_nodes_internal(&self, _query: &str) -> NodeSpaceResult<Vec<Node>> {
+        // Placeholder: return all nodes for now
+        // In real implementation, this would do proper querying
+        Ok(self.internal_storage.read().await.values().cloned().collect())
+    }
+
+    // search_similar_nodes not needed for MVP - removed
+
+    /// Internal helper: Get child nodes using parent_id relationships
+    async fn get_child_nodes_internal(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        let storage = self.internal_storage.read().await;
+        let mut children = Vec::new();
+        
+        // Look through all nodes to find ones with this parent_id
+        for node in storage.values() {
+            // Check if this node has the parent_id in its metadata/content
+            if let Some(metadata) = &node.metadata {
+                if let Some(parent) = metadata.get("parent_id") {
+                    if parent.as_str() == Some(parent_id.as_str()) {
+                        children.push(node.clone());
+                    }
+                }
+            }
+            // Also check content for parent_id
+            if let Some(parent) = node.content.get("parent_id") {
+                if parent.as_str() == Some(parent_id.as_str()) {
+                    children.push(node.clone());
+                }
+            }
+        }
+        
+        Ok(children)
+    }
+
+    /// Internal helper: Update a node's content
+    async fn update_node_internal(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
+        let mut storage = self.internal_storage.write().await;
+        
+        if let Some(node) = storage.get_mut(node_id) {
+            node.content = serde_json::json!({
+                "text": content,
+                "type": node.content.get("type").unwrap_or(&serde_json::Value::String("text".to_string()))
+            });
+            node.touch();
+            Ok(())
+        } else {
+            Err(NodeSpaceError::NotFound(format!("Node {} not found", node_id)))
+        }
+    }
+
+    /// Internal helper: Delete a node
+    async fn delete_node_internal(&self, node_id: &NodeId) -> NodeSpaceResult<()> {
+        self.internal_storage.write().await.remove(node_id);
+        
+        // Also remove from date index
+        let mut date_index = self.date_index.write().await;
+        for (_, node_ids) in date_index.iter_mut() {
+            node_ids.retain(|id| id != node_id);
+        }
+        
+        Ok(())
     }
 
     /// Get a reference to the NLP engine
@@ -480,8 +565,21 @@ impl DateNavigation for ServiceContainer {
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>> {
         let date_str = date.format("%Y-%m-%d").to_string();
 
-        // Use the specialized DataStore method instead of raw SQL
-        self.data_store.get_nodes_for_date(&date_str).await
+        // Use internal storage with date index
+        let date_index = self.date_index.read().await;
+        let storage = self.internal_storage.read().await;
+        
+        if let Some(node_ids) = date_index.get(&date_str) {
+            let mut nodes = Vec::new();
+            for node_id in node_ids {
+                if let Some(node) = storage.get(node_id) {
+                    nodes.push(node.clone());
+                }
+            }
+            Ok(nodes)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
@@ -511,7 +609,7 @@ impl DateNavigation for ServiceContainer {
         // Find the latest date before the current date that has content
         // Use a simpler approach - query all text nodes and filter in Rust
         let query = "SELECT * FROM text WHERE parent_date IS NOT NULL";
-        let result_nodes = self.data_store.query_nodes(query).await?;
+        let result_nodes = self.query_nodes_internal(query).await?;
 
         // Extract unique parent_date values and sort them
         let mut dates: Vec<String> = Vec::new();
@@ -545,7 +643,7 @@ impl DateNavigation for ServiceContainer {
         // Find the earliest date after the current date that has content
         // Use a simpler approach - query all dates with content and filter in Rust
         let query = "SELECT DISTINCT parent_date FROM text WHERE parent_date IS NOT NULL ORDER BY parent_date ASC";
-        let result_nodes = self.data_store.query_nodes(query).await?;
+        let result_nodes = self.query_nodes_internal(query).await?;
 
         // Filter dates that are after current_date
         for node in result_nodes {
@@ -564,22 +662,40 @@ impl DateNavigation for ServiceContainer {
     async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode> {
         let date_str = date.format("%Y-%m-%d").to_string();
         let description = format!("{}", date.format("%A, %B %d, %Y"));
-
-        // Use the specialized DataStore method to create or get the date node
-        let node_id = self
-            .data_store
-            .create_or_get_date_node(&date_str, Some(&description))
-            .await?;
-
-        // Get child count using the specialized DataStore method
-        let children = self.data_store.get_date_children(&date_str).await?;
-        let child_count = children.len();
-
+        
+        // Date nodes use semantic IDs (YYYY-MM-DD format)
+        let date_node_id = NodeId::from(date_str.as_str());
+        
+        // Check if date node already exists in internal storage
+        if let Some(existing_node) = self.get_node_internal(&date_node_id).await? {
+            // Date node exists, get child count
+            let children = self.get_child_nodes(&date_node_id).await?;
+            return Ok(DateNode {
+                id: existing_node.id,
+                date,
+                description: Some(description),
+                child_count: children.len(),
+            });
+        }
+        
+        // Create new date node using proper Node structure
+        let date_node = Node::with_id(
+            date_node_id.clone(),
+            serde_json::json!({
+                "type": "date",
+                "description": description,
+                "date": date_str
+            })
+        );
+        
+        // Store the date node
+        let stored_id = self.store_node_internal(date_node).await?;
+        
         Ok(DateNode {
-            id: node_id,
+            id: stored_id,
             date,
             description: Some(description),
-            child_count,
+            child_count: 0, // New node has no children
         })
     }
 
@@ -588,16 +704,12 @@ impl DateNavigation for ServiceContainer {
         let date_str = date_node_id.to_string();
 
         // Get children using the specialized DataStore method
-        let children_json = self.data_store.get_date_children(&date_str).await?;
+        // Use proper universal schema pattern: get date node, then its children
+        let date_node_id = NodeId::from(date_str.as_str()); // Date nodes use semantic YYYY-MM-DD IDs  
+        let children_json = self.get_child_nodes(&date_node_id).await?;
 
-        // Convert JSON values to Node structs
-        let mut nodes = Vec::new();
-        for child_json in children_json {
-            // Parse each JSON value as a Node
-            if let Ok(node) = serde_json::from_value::<Node>(child_json) {
-                nodes.push(node);
-            }
-        }
+        // children_json is already Vec<Node> from get_child_nodes
+        let nodes = children_json;
 
         Ok(nodes)
     }
@@ -697,12 +809,12 @@ pub struct QueryResponse {
 impl CoreLogic for ServiceContainer {
     async fn get_nodes_for_date(&self, date: &str) -> NodeSpaceResult<Vec<Node>> {
         // Use the specialized DataStore method
-        self.data_store.get_nodes_for_date(date).await
+        DateNavigation::get_nodes_for_date(self, date.parse().map_err(|_| NodeSpaceError::ProcessingError("Invalid date format".into()))?).await
     }
 
     async fn create_text_node(&self, content: &str, date: &str) -> NodeSpaceResult<NodeId> {
         // Generate embedding first
-        let embedding = self.nlp_engine.generate_embedding(content).await?;
+        let _embedding = self.nlp_engine.generate_embedding(content).await?;
 
         // Create node with embedding and metadata
         let node = Node::new(serde_json::Value::String(content.to_string()))
@@ -711,7 +823,8 @@ impl CoreLogic for ServiceContainer {
         let node_id = node.id.clone();
 
         // Store node with embedding using the data store's method
-        self.data_store.store_node_with_embedding(node, embedding).await?;
+        // Store node with embedding in internal storage (embedding not used for now)
+        self.store_node_internal(node).await?;
 
         Ok(node_id)
     }
@@ -722,18 +835,27 @@ impl CoreLogic for ServiceContainer {
         limit: usize,
     ) -> NodeSpaceResult<Vec<SearchResult>> {
         // Generate query embedding
-        let query_embedding = self.nlp_engine.generate_embedding(query).await?;
+        let _query_embedding = self.nlp_engine.generate_embedding(query).await?;
 
-        // Perform vector similarity search using the data store's search method
-        let results = self.data_store.search_similar_nodes(query_embedding, limit).await?;
-
-        // Convert to SearchResult format
-        let search_results = results
-            .into_iter()
-            .map(|(node, score)| SearchResult {
+        // For MVP: Simple text search through internal storage
+        let storage = self.internal_storage.read().await;
+        let search_results = storage
+            .values()
+            .filter(|node| {
+                // Simple text matching in content
+                if let Some(text) = node.content.as_str() {
+                    text.to_lowercase().contains(&query.to_lowercase())
+                } else if let Some(text) = node.content.get("text") {
+                    text.as_str().unwrap_or("").to_lowercase().contains(&query.to_lowercase())
+                } else {
+                    false
+                }
+            })
+            .take(limit)
+            .map(|node| SearchResult {
                 node_id: node.id.clone(),
-                node,
-                score,
+                node: node.clone(),
+                score: 0.8, // Placeholder score
             })
             .collect();
 
@@ -776,51 +898,39 @@ impl CoreLogic for ServiceContainer {
     }
 
     async fn add_child_node(&self, parent_id: &NodeId, child_id: &NodeId) -> NodeSpaceResult<()> {
-        // Use the DataStore method to create a "contains" relationship
-        self.data_store
-            .create_relationship(parent_id, child_id, "contains")
-            .await
+        // Update child node to reference parent in universal schema
+        let mut storage = self.internal_storage.write().await;
+        
+        if let Some(child_node) = storage.get_mut(child_id) {
+            // Add parent_id to child's content or metadata
+            if let Some(content_obj) = child_node.content.as_object_mut() {
+                content_obj.insert("parent_id".to_string(), serde_json::Value::String(parent_id.to_string()));
+            } else {
+                // If content is not an object, wrap it
+                let old_content = child_node.content.clone();
+                child_node.content = serde_json::json!({
+                    "content": old_content,
+                    "parent_id": parent_id.to_string()
+                });
+            }
+            child_node.touch();
+        }
+        
+        Ok(())
     }
 
     async fn get_child_nodes(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
         // Use the DataStore method to get children via relationships
         // For date nodes, use get_date_children; for other nodes, use a query
-        let parent_str = parent_id.to_string();
+        let _parent_str = parent_id.to_string();
 
-        // Check if this looks like a date (YYYY-MM-DD format)
-        if parent_str.len() == 10
-            && parent_str.chars().nth(4) == Some('-')
-            && parent_str.chars().nth(7) == Some('-')
-        {
-            // Use date-specific method
-            let children_json = self.data_store.get_date_children(&parent_str).await?;
-            let mut nodes = Vec::new();
-            for child_json in children_json {
-                if let Ok(node) = serde_json::from_value::<Node>(child_json) {
-                    nodes.push(node);
-                }
-            }
-            Ok(nodes)
-        } else {
-            // Use generic relationship query for non-date nodes
-            let query = format!("SELECT * FROM {} WHERE in = {}", "relationships", parent_id);
-            self.data_store.query_nodes(&query).await
-        }
+        // Use internal helper for all nodes (dates and others)
+        self.get_child_nodes_internal(parent_id).await
     }
 
     async fn update_node(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
-        // Get existing node, update content, store it back
-        let mut node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
-
-        node.content = serde_json::Value::String(content.to_string());
-        node.updated_at = chrono::Utc::now().to_rfc3339();
-
-        self.data_store.store_node(node).await?;
-        Ok(())
+        // Use internal helper to update node
+        self.update_node_internal(node_id, content).await
     }
 
     async fn make_siblings(
@@ -834,33 +944,36 @@ impl CoreLogic for ServiceContainer {
 
         // Validate both nodes exist
         let _left_node = self
-            .data_store
-            .get_node(left_node_id)
+            .get_node_internal(left_node_id)
             .await?
             .ok_or_else(|| {
                 NodeSpaceError::NotFound(format!("Left node {} not found", left_node_id))
             })?;
         let _right_node = self
-            .data_store
-            .get_node(right_node_id)
+            .get_node_internal(right_node_id)
             .await?
             .ok_or_else(|| {
                 NodeSpaceError::NotFound(format!("Right node {} not found", right_node_id))
             })?;
 
-        // Create bidirectional sibling relationships
-        self.data_store
-            .create_relationship(left_node_id, right_node_id, "next_sibling")
-            .await?;
-        self.data_store
-            .create_relationship(right_node_id, left_node_id, "previous_sibling")
-            .await?;
+        // Update sibling pointers in the nodes themselves (using Node struct fields)
+        let mut storage = self.internal_storage.write().await;
+        
+        if let Some(left_node) = storage.get_mut(left_node_id) {
+            left_node.next_sibling = Some(right_node_id.clone());
+            left_node.touch();
+        }
+        
+        if let Some(right_node) = storage.get_mut(right_node_id) {
+            right_node.previous_sibling = Some(left_node_id.clone());
+            right_node.touch();
+        }
 
         Ok(())
     }
 
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
-        self.data_store.get_node(node_id).await
+        self.get_node_internal(node_id).await
     }
 }
 
