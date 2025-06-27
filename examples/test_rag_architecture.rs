@@ -1,8 +1,8 @@
 //! Test RAG architecture without requiring full model loading
 
 use nodespace_core_logic::{
-    ServiceContainer, RAGService, RAGQueryRequest, ChatMessage, MessageRole, 
-    RAGConfig, TokenBudget, CoreLogic
+    ChatMessage, CoreLogic, MessageRole, RAGConfig, RAGQueryRequest, RAGService, ServiceContainer,
+    TokenBudget,
 };
 use std::error::Error;
 
@@ -14,22 +14,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Test 1: RAG Configuration
     println!("1️⃣ Testing RAG Configuration:");
     let rag_config = RAGConfig::default();
-    println!("   ✅ Max retrieval results: {}", rag_config.max_retrieval_results);
-    println!("   ✅ Relevance threshold: {:.2}", rag_config.relevance_threshold);
-    println!("   ✅ Max context tokens: {}", rag_config.max_context_tokens);
-    println!("   ✅ Conversation context limit: {}", rag_config.conversation_context_limit);
-    println!("   ✅ Reserved response tokens: {}", rag_config.reserved_response_tokens);
+    println!(
+        "   ✅ Max retrieval results: {}",
+        rag_config.max_retrieval_results
+    );
+    println!(
+        "   ✅ Relevance threshold: {:.2}",
+        rag_config.relevance_threshold
+    );
+    println!(
+        "   ✅ Max context tokens: {}",
+        rag_config.max_context_tokens
+    );
+    println!(
+        "   ✅ Conversation context limit: {}",
+        rag_config.conversation_context_limit
+    );
+    println!(
+        "   ✅ Reserved response tokens: {}",
+        rag_config.reserved_response_tokens
+    );
 
     // Test 2: Token Budget Management
     println!("\n2️⃣ Testing Token Budget Management:");
     let mut token_budget = TokenBudget::new(4096, 512);
     println!("   ✅ Total available: {}", token_budget.total_available);
-    println!("   ✅ Available for context: {}", token_budget.available_for_context());
-    
+    println!(
+        "   ✅ Available for context: {}",
+        token_budget.available_for_context()
+    );
+
     token_budget.allocate_conversation_tokens(500);
     token_budget.allocate_knowledge_tokens(800);
-    println!("   ✅ Tokens used after allocation: {}", token_budget.tokens_used());
-    println!("   ✅ Tokens remaining: {}", token_budget.tokens_remaining());
+    println!(
+        "   ✅ Tokens used after allocation: {}",
+        token_budget.tokens_used()
+    );
+    println!(
+        "   ✅ Tokens remaining: {}",
+        token_budget.tokens_remaining()
+    );
 
     // Test 3: Chat Message Structure
     println!("\n3️⃣ Testing Chat Message Structure:");
@@ -42,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         sequence_number: 1,
         rag_context: None,
     };
-    
+
     println!("   ✅ Message ID: {}", chat_message.id);
     println!("   ✅ Session ID: {}", chat_message.session_id);
     println!("   ✅ Role: {:?}", chat_message.role);
@@ -81,13 +105,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("   ✅ Query: {}", rag_request.query);
     println!("   ✅ Session ID: {}", rag_request.session_id);
-    println!("   ✅ Conversation history: {} messages", rag_request.conversation_history.len());
+    println!(
+        "   ✅ Conversation history: {} messages",
+        rag_request.conversation_history.len()
+    );
     println!("   ✅ Date scope: {:?}", rag_request.date_scope);
     println!("   ✅ Max results: {:?}", rag_request.max_results);
 
     // Test 5: Architecture Validation (without ServiceContainer initialization)
     println!("\n5️⃣ Testing Architecture Validation:");
-    
+
     // Test conversation context processing logic
     let recent_user_messages: Vec<String> = conversation_history
         .iter()
@@ -101,32 +128,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         })
         .collect();
-    
-    println!("   ✅ Recent user messages extracted: {}", recent_user_messages.len());
-    
+
+    println!(
+        "   ✅ Recent user messages extracted: {}",
+        recent_user_messages.len()
+    );
+
     // Test enhanced query construction
     let enhanced_query = if recent_user_messages.is_empty() {
         rag_request.query.clone()
     } else {
-        format!("{}\n\nRecent conversation context: {}", 
-                rag_request.query, 
-                recent_user_messages.join("; "))
+        format!(
+            "{}\n\nRecent conversation context: {}",
+            rag_request.query,
+            recent_user_messages.join("; ")
+        )
     };
-    
-    println!("   ✅ Enhanced query constructed: {} chars", enhanced_query.len());
-    println!("   📝 Enhanced query preview: {}...", 
-             enhanced_query.chars().take(80).collect::<String>());
+
+    println!(
+        "   ✅ Enhanced query constructed: {} chars",
+        enhanced_query.len()
+    );
+    println!(
+        "   📝 Enhanced query preview: {}...",
+        enhanced_query.chars().take(80).collect::<String>()
+    );
 
     // Test 6: ServiceContainer Architecture (Type checking)
     println!("\n6️⃣ Testing ServiceContainer Architecture:");
-    
+
     // These are compile-time checks that validate the interface exists
     fn validate_core_logic_interface() {
         // This function validates that ServiceContainer implements CoreLogic
         // by referencing the trait methods (compile-time verification)
         println!("   ✅ CoreLogic trait methods available:");
         println!("     - get_nodes_for_date");
-        println!("     - create_text_node");  
+        println!("     - create_text_node");
         println!("     - semantic_search");
         println!("     - process_query");
         println!("     - add_child_node");
@@ -135,7 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("     - make_siblings");
         println!("     - get_node");
     }
-    
+
     fn validate_rag_service_interface() {
         println!("   ✅ RAGService trait methods available:");
         println!("     - process_rag_query");
@@ -143,7 +180,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("     - assemble_rag_context");
         println!("     - calculate_token_budget");
     }
-    
+
     validate_core_logic_interface();
     validate_rag_service_interface();
 
