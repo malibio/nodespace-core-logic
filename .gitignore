@@ -10,3 +10,4 @@ Cargo.lock
 # OS files
 .DS_Store
 Thumbs.db
+.fastembed_cache/
