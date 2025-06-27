@@ -93,6 +93,15 @@ impl DataStore for MockDataStore {
         // For mock, this is a no-op since we don't actually store embeddings
         Ok(())
     }
+
+    async fn semantic_search_with_embedding(
+        &self,
+        embedding: Vec<f32>,
+        limit: usize,
+    ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+        // For mock, delegate to search_similar_nodes
+        self.search_similar_nodes(embedding, limit).await
+    }
 }
 
 /// Mock NLP Engine for testing
@@ -130,6 +139,33 @@ impl NLPEngine for MockNLPEngine {
 
     fn embedding_dimensions(&self) -> usize {
         5
+    }
+
+    async fn generate_text_enhanced(
+        &self,
+        request: nodespace_nlp_engine::TextGenerationRequest,
+    ) -> NodeSpaceResult<nodespace_nlp_engine::EnhancedTextGenerationResponse> {
+        // For mock, create a simple enhanced response
+        let answer = format!(
+            "Generated response for: {}",
+            request.prompt.chars().take(50).collect::<String>()
+        );
+        
+        Ok(nodespace_nlp_engine::EnhancedTextGenerationResponse {
+            text: answer,
+            tokens_used: 50,
+            generation_metrics: nodespace_nlp_engine::GenerationMetrics {
+                generation_time_ms: 100,
+                context_tokens: 25,
+                response_tokens: 50,
+                temperature_used: 0.7,
+            },
+            context_utilization: nodespace_nlp_engine::ContextUtilization {
+                context_referenced: true,
+                sources_mentioned: vec!["mock-source".to_string()],
+                relevance_score: 0.8,
+            },
+        })
     }
 }
 

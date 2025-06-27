@@ -314,6 +314,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata: Some(metadata),
             created_at: now.clone(),
             updated_at: now,
+            next_sibling: None,
+            previous_sibling: None,
         };
 
         // Store the node
@@ -647,6 +649,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
             metadata,
             created_at: now.clone(),
             updated_at: now,
+            next_sibling: None,
+            previous_sibling: None,
         };
 
         self.data_store.store_node(node).await?;
@@ -812,6 +816,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
             })),
             created_at: now.clone(),
             updated_at: now,
+            next_sibling: None,
+            previous_sibling: None,
         };
 
         // Store the date node
