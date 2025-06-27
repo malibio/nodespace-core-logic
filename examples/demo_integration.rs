@@ -1,11 +1,17 @@
-use nodespace_core_logic::{CoreLogic, LegacyCoreLogic, NodeSpaceService};
+use chrono::NaiveDate;
+use nodespace_core_logic::{CoreLogic, DateNavigation, LegacyCoreLogic, NodeSpaceService};
 use nodespace_data_store::LanceDataStore;
 use nodespace_nlp_engine::LocalNLPEngine;
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("NodeSpace Core Logic - NS-13 Business Logic & Integration Demo");
+    println!("🔧 Testing Hierarchy Fix for get_nodes_for_date() - BLOCKING DESKTOP APP");
+
+    // Test the hierarchy fix first
+    test_hierarchy_fix().await?;
+
+    println!("\nNodeSpace Core Logic - NS-13 Business Logic & Integration Demo");
 
     // Initialize services using distributed contracts
     let data_store = LanceDataStore::new("memory").await?;
@@ -120,6 +126,116 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✅ Event Handling - System events and state changes");
     println!("  ✅ API Layer - External interfaces and service coordination");
     println!("  ✅ Distributed Contract Usage - Direct service trait imports");
+
+    Ok(())
+}
+
+/// Test the hierarchy fix for get_nodes_for_date - only returns top-level nodes
+async fn test_hierarchy_fix() -> Result<(), Box<dyn std::error::Error>> {
+    println!("1️⃣ Creating service with pure LanceDB (no HashMap fallback)");
+
+    // Create service using pure LanceDB
+    let service = NodeSpaceService::create_with_paths(
+        "/Users/malibio/nodespace/data/lance_db/hierarchy_test.db",
+        None,
+    )
+    .await?;
+    service.initialize().await?;
+
+    let today = chrono::Utc::now().date_naive();
+
+    println!("2️⃣ Creating test hierarchy for {}", today);
+
+    // Create a top-level parent node (no parent_id)
+    let parent_id = service
+        .create_node(
+            json!("PARENT: This should appear in get_nodes_for_date"),
+            Some(json!({
+                "type": "parent",
+                "category": "top_level"
+                // No parent_id = top-level
+            })),
+        )
+        .await?;
+
+    // Create a child node (has parent_id)
+    let _child_id = service
+        .create_node(
+            json!("CHILD: This should NOT appear in get_nodes_for_date"),
+            Some(json!({
+                "type": "child",
+                "category": "nested",
+                "parent_id": parent_id.to_string() // Has parent_id = child level
+            })),
+        )
+        .await?;
+
+    // Create another top-level node
+    let _sibling_id = service
+        .create_node(
+            json!("SIBLING: This should appear in get_nodes_for_date"),
+            Some(json!({
+                "type": "sibling",
+                "category": "top_level"
+                // No parent_id = top-level
+            })),
+        )
+        .await?;
+
+    println!("3️⃣ Testing get_nodes_for_date() hierarchy fix");
+
+    let nodes_for_date = service.get_nodes_for_date(today).await?;
+
+    println!("   📊 Nodes returned: {}", nodes_for_date.len());
+    println!("   🎯 Expected: 2 (parent + sibling only)");
+
+    let mut found_parent = false;
+    let mut found_sibling = false;
+    let mut found_child = false;
+
+    for (i, node) in nodes_for_date.iter().enumerate() {
+        if let Some(content) = node.content.as_str() {
+            println!(
+                "   📝 Node {}: {}",
+                i + 1,
+                content.chars().take(30).collect::<String>()
+            );
+
+            if content.contains("PARENT:") {
+                found_parent = true;
+            }
+            if content.contains("SIBLING:") {
+                found_sibling = true;
+            }
+            if content.contains("CHILD:") {
+                found_child = true;
+            }
+        }
+
+        // Check for hierarchy violations
+        if let Some(metadata) = &node.metadata {
+            if metadata.get("parent_id").is_some() {
+                println!("      ❌ ERROR: Node with parent_id returned!");
+            }
+        }
+    }
+
+    println!("4️⃣ Hierarchy Fix Results");
+
+    if found_parent && found_sibling && !found_child && nodes_for_date.len() == 2 {
+        println!("   ✅ SUCCESS: Hierarchy fix working!");
+        println!("   ✅ Only top-level nodes returned");
+        println!("   ✅ Child nodes properly filtered out");
+        println!("   ✅ Desktop app should now show proper hierarchy");
+    } else {
+        println!("   ❌ FAILURE: Hierarchy fix broken");
+        println!("      Found parent: {}", found_parent);
+        println!("      Found sibling: {}", found_sibling);
+        println!("      Found child: {} (should be false)", found_child);
+        println!("      Node count: {} (should be 2)", nodes_for_date.len());
+    }
+
+    println!("🔧 Hierarchy test complete - proceeding with main demo...\n");
 
     Ok(())
 }
