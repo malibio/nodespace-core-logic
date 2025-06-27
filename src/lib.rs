@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
-use nodespace_data_store::DataStore; // Only for trait bounds, not direct usage
+use nodespace_data_store::{DataStore, LanceDataStore}; // Import LanceDataStore implementation
 use nodespace_nlp_engine::{LocalNLPEngine, NLPEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -58,11 +58,11 @@ pub struct RAGMessageContext {
 /// Configuration for RAG operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RAGConfig {
-    pub max_retrieval_results: usize,     // Default: 5
-    pub relevance_threshold: f32,         // Default: 0.7
-    pub max_context_tokens: usize,        // Default: 2048
+    pub max_retrieval_results: usize,      // Default: 5
+    pub relevance_threshold: f32,          // Default: 0.7
+    pub max_context_tokens: usize,         // Default: 2048
     pub conversation_context_limit: usize, // Default: 5 messages
-    pub reserved_response_tokens: usize,  // Default: 512
+    pub reserved_response_tokens: usize,   // Default: 512
 }
 
 impl Default for RAGConfig {
@@ -80,11 +80,11 @@ impl Default for RAGConfig {
 /// Token budget management for conversation context
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
-    pub total_available: usize,        // Model's context window
-    pub reserved_for_response: usize,  // 512 tokens for response
-    pub conversation_history: usize,   // Recent chat context
-    pub knowledge_context: usize,      // Retrieved information
-    pub system_prompt: usize,          // Instructions
+    pub total_available: usize,       // Model's context window
+    pub reserved_for_response: usize, // 512 tokens for response
+    pub conversation_history: usize,  // Recent chat context
+    pub knowledge_context: usize,     // Retrieved information
+    pub system_prompt: usize,         // Instructions
 }
 
 impl TokenBudget {
@@ -117,7 +117,8 @@ impl TokenBudget {
     }
 
     pub fn tokens_remaining(&self) -> usize {
-        self.total_available.saturating_sub(self.tokens_used() + self.reserved_for_response)
+        self.total_available
+            .saturating_sub(self.tokens_used() + self.reserved_for_response)
     }
 }
 
@@ -351,13 +352,11 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
     }
 }
 
-
-/// ServiceContainer for coordinating all NodeSpace services
-/// Uses internal storage and coordinates with external services via configuration only
+/// ServiceContainer for coordinating all NodeSpace services  
+/// Uses LanceDataStore for simplified relationship model and vector-first operations
 pub struct ServiceContainer {
-    // Internal storage - no direct external data-store dependencies
-    internal_storage: Arc<RwLock<std::collections::HashMap<NodeId, Node>>>,
-    date_index: Arc<RwLock<std::collections::HashMap<String, Vec<NodeId>>>>,
+    // LanceDB data store with simplified JSON-based relationships
+    data_store: LanceDataStore,
     nlp_engine: LocalNLPEngine,
     config: NodeSpaceConfig,
     rag_config: RAGConfig,
@@ -371,27 +370,32 @@ pub enum InitializationError {
     NLPError(#[from] nodespace_nlp_engine::NLPError),
     #[error("Core service initialization failed: {0}")]
     CoreServiceError(#[from] NodeSpaceError),
+    #[error("Data store initialization failed: {0}")]
+    DataStoreError(#[from] nodespace_data_store::DataStoreError),
 }
 
 impl ServiceContainer {
-    /// Create a new ServiceContainer with the shared database path
-    /// This ensures both core-logic and data-store use the same SurrealDB instance
+    /// Create a new ServiceContainer with LanceDB data store
+    /// Uses simplified relationship model and vector-first operations
     pub async fn new() -> Result<Self, InitializationError> {
         Self::new_with_config(NodeSpaceConfig::default()).await
     }
 
     /// Create ServiceContainer with custom configuration
     pub async fn new_with_config(config: NodeSpaceConfig) -> Result<Self, InitializationError> {
+        // Initialize LanceDB data store with simplified relationship model
+        let mut data_store = LanceDataStore::new("./data/lance.db").await?;
+        data_store.initialize_table().await?;
+
         // Initialize NLP engine with shared model configuration
         let nlp_engine = LocalNLPEngine::new();
         nlp_engine.initialize().await?;
 
-        // Create service container with internal storage
+        // Create service container with LanceDB integration
         let state = Arc::new(RwLock::new(ServiceState::Ready));
 
         Ok(ServiceContainer {
-            internal_storage: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            date_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            data_store,
             nlp_engine,
             config,
             rag_config: RAGConfig::default(),
@@ -399,98 +403,13 @@ impl ServiceContainer {
         })
     }
 
-    /// Get internal storage size for debugging
+    /// Get data store size for debugging (uses LanceDB)
     pub async fn storage_size(&self) -> usize {
-        self.internal_storage.read().await.len()
-    }
-
-    /// Internal helper: Store a node in internal storage
-    async fn store_node_internal(&self, node: Node) -> NodeSpaceResult<NodeId> {
-        let node_id = node.id.clone();
-        
-        // Store the node
-        self.internal_storage.write().await.insert(node_id.clone(), node.clone());
-        
-        // Update date index if this is a date-associated node  
-        // Extract date from ISO timestamp (YYYY-MM-DDTHH:MM:SS format)
-        let date_str = node.created_at.split('T').next().unwrap_or("").to_string();
-        if !date_str.is_empty() {
-            self.date_index.write().await
-                .entry(date_str)
-                .or_insert_with(Vec::new)
-                .push(node_id.clone());
+        // Get all nodes from LanceDB data store
+        match self.data_store.query_nodes("").await {
+            Ok(nodes) => nodes.len(),
+            Err(_) => 0,
         }
-        
-        Ok(node_id)
-    }
-
-    /// Internal helper: Get a node from internal storage
-    async fn get_node_internal(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
-        Ok(self.internal_storage.read().await.get(node_id).cloned())
-    }
-
-    /// Internal helper: Query nodes (placeholder - returns all for now)
-    async fn query_nodes_internal(&self, _query: &str) -> NodeSpaceResult<Vec<Node>> {
-        // Placeholder: return all nodes for now
-        // In real implementation, this would do proper querying
-        Ok(self.internal_storage.read().await.values().cloned().collect())
-    }
-
-    // search_similar_nodes not needed for MVP - removed
-
-    /// Internal helper: Get child nodes using parent_id relationships
-    async fn get_child_nodes_internal(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
-        let storage = self.internal_storage.read().await;
-        let mut children = Vec::new();
-        
-        // Look through all nodes to find ones with this parent_id
-        for node in storage.values() {
-            // Check if this node has the parent_id in its metadata/content
-            if let Some(metadata) = &node.metadata {
-                if let Some(parent) = metadata.get("parent_id") {
-                    if parent.as_str() == Some(parent_id.as_str()) {
-                        children.push(node.clone());
-                    }
-                }
-            }
-            // Also check content for parent_id
-            if let Some(parent) = node.content.get("parent_id") {
-                if parent.as_str() == Some(parent_id.as_str()) {
-                    children.push(node.clone());
-                }
-            }
-        }
-        
-        Ok(children)
-    }
-
-    /// Internal helper: Update a node's content
-    async fn update_node_internal(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
-        let mut storage = self.internal_storage.write().await;
-        
-        if let Some(node) = storage.get_mut(node_id) {
-            node.content = serde_json::json!({
-                "text": content,
-                "type": node.content.get("type").unwrap_or(&serde_json::Value::String("text".to_string()))
-            });
-            node.touch();
-            Ok(())
-        } else {
-            Err(NodeSpaceError::NotFound(format!("Node {} not found", node_id)))
-        }
-    }
-
-    /// Internal helper: Delete a node
-    async fn delete_node_internal(&self, node_id: &NodeId) -> NodeSpaceResult<()> {
-        self.internal_storage.write().await.remove(node_id);
-        
-        // Also remove from date index
-        let mut date_index = self.date_index.write().await;
-        for (_, node_ids) in date_index.iter_mut() {
-            node_ids.retain(|id| id != node_id);
-        }
-        
-        Ok(())
     }
 
     /// Get a reference to the NLP engine
@@ -524,7 +443,7 @@ impl ServiceContainer {
             date_scope: None,
             max_results: None,
         };
-        
+
         RAGService::process_rag_query(self, request).await
     }
 
@@ -543,7 +462,7 @@ impl ServiceContainer {
             date_scope,
             max_results: None,
         };
-        
+
         RAGService::process_rag_query(self, request).await
     }
 
@@ -558,28 +477,28 @@ impl ServiceContainer {
     }
 }
 
-
 // Implement DateNavigation trait for ServiceContainer
 #[async_trait]
 impl DateNavigation for ServiceContainer {
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>> {
         let date_str = date.format("%Y-%m-%d").to_string();
 
-        // Use internal storage with date index
-        let date_index = self.date_index.read().await;
-        let storage = self.internal_storage.read().await;
-        
-        if let Some(node_ids) = date_index.get(&date_str) {
-            let mut nodes = Vec::new();
-            for node_id in node_ids {
-                if let Some(node) = storage.get(node_id) {
-                    nodes.push(node.clone());
+        // Use LanceDB data store with simplified querying
+        // Query nodes that have parent_date metadata matching the date
+        let all_nodes = self.data_store.query_nodes("").await?;
+
+        let mut date_nodes = Vec::new();
+        for node in all_nodes {
+            if let Some(metadata) = &node.metadata {
+                if let Some(parent_date) = metadata.get("parent_date") {
+                    if parent_date.as_str() == Some(&date_str) {
+                        date_nodes.push(node);
+                    }
                 }
             }
-            Ok(nodes)
-        } else {
-            Ok(Vec::new())
         }
+
+        Ok(date_nodes)
     }
 
     async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
@@ -606,14 +525,12 @@ impl DateNavigation for ServiceContainer {
     ) -> NodeSpaceResult<Option<NaiveDate>> {
         let current_str = current_date.format("%Y-%m-%d").to_string();
 
-        // Find the latest date before the current date that has content
-        // Use a simpler approach - query all text nodes and filter in Rust
-        let query = "SELECT * FROM text WHERE parent_date IS NOT NULL";
-        let result_nodes = self.query_nodes_internal(query).await?;
+        // Use LanceDB data store to get all nodes with parent_date metadata
+        let all_nodes = self.data_store.query_nodes("").await?;
 
         // Extract unique parent_date values and sort them
         let mut dates: Vec<String> = Vec::new();
-        for node in &result_nodes {
+        for node in &all_nodes {
             if let Some(metadata) = &node.metadata {
                 if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
                     if !dates.contains(&parent_date.to_string()) {
@@ -640,18 +557,27 @@ impl DateNavigation for ServiceContainer {
     async fn get_next_day(&self, current_date: NaiveDate) -> NodeSpaceResult<Option<NaiveDate>> {
         let current_str = current_date.format("%Y-%m-%d").to_string();
 
-        // Find the earliest date after the current date that has content
-        // Use a simpler approach - query all dates with content and filter in Rust
-        let query = "SELECT DISTINCT parent_date FROM text WHERE parent_date IS NOT NULL ORDER BY parent_date ASC";
-        let result_nodes = self.query_nodes_internal(query).await?;
+        // Use LanceDB data store to get all nodes with parent_date metadata
+        let all_nodes = self.data_store.query_nodes("").await?;
+
+        // Extract unique parent_date values and sort them ascending
+        let mut dates: Vec<String> = Vec::new();
+        for node in &all_nodes {
+            if let Some(metadata) = &node.metadata {
+                if let Some(parent_date) = metadata.get("parent_date").and_then(|v| v.as_str()) {
+                    if !dates.contains(&parent_date.to_string()) {
+                        dates.push(parent_date.to_string());
+                    }
+                }
+            }
+        }
+        dates.sort(); // ASC order
 
         // Filter dates that are after current_date
-        for node in result_nodes {
-            if let Some(date_str) = node.content.as_str() {
-                if date_str > current_str.as_str() {
-                    if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                        return Ok(Some(parsed_date));
-                    }
+        for date_str in &dates {
+            if date_str > &current_str {
+                if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    return Ok(Some(parsed_date));
                 }
             }
         }
@@ -662,14 +588,14 @@ impl DateNavigation for ServiceContainer {
     async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode> {
         let date_str = date.format("%Y-%m-%d").to_string();
         let description = format!("{}", date.format("%A, %B %d, %Y"));
-        
+
         // Date nodes use semantic IDs (YYYY-MM-DD format)
         let date_node_id = NodeId::from(date_str.as_str());
-        
-        // Check if date node already exists in internal storage
-        if let Some(existing_node) = self.get_node_internal(&date_node_id).await? {
-            // Date node exists, get child count
-            let children = self.get_child_nodes(&date_node_id).await?;
+
+        // Check if date node already exists in LanceDB data store
+        if let Some(existing_node) = self.data_store.get_node(&date_node_id).await? {
+            // Date node exists, get child count using LanceDB simplified relationship model
+            let children = self.data_store.get_child_nodes(&date_node_id).await?;
             return Ok(DateNode {
                 id: existing_node.id,
                 date,
@@ -677,7 +603,7 @@ impl DateNavigation for ServiceContainer {
                 child_count: children.len(),
             });
         }
-        
+
         // Create new date node using proper Node structure
         let date_node = Node::with_id(
             date_node_id.clone(),
@@ -685,12 +611,12 @@ impl DateNavigation for ServiceContainer {
                 "type": "date",
                 "description": description,
                 "date": date_str
-            })
+            }),
         );
-        
-        // Store the date node
-        let stored_id = self.store_node_internal(date_node).await?;
-        
+
+        // Store the date node using LanceDB data store
+        let stored_id = self.data_store.store_node(date_node).await?;
+
         Ok(DateNode {
             id: stored_id,
             date,
@@ -700,18 +626,9 @@ impl DateNavigation for ServiceContainer {
     }
 
     async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
-        // Use the date_node_id as the date string for the specialized DataStore method
-        let date_str = date_node_id.to_string();
-
-        // Get children using the specialized DataStore method
-        // Use proper universal schema pattern: get date node, then its children
-        let date_node_id = NodeId::from(date_str.as_str()); // Date nodes use semantic YYYY-MM-DD IDs  
-        let children_json = self.get_child_nodes(&date_node_id).await?;
-
-        // children_json is already Vec<Node> from get_child_nodes
-        let nodes = children_json;
-
-        Ok(nodes)
+        // Use LanceDB data store's simplified relationship model
+        // Get children using JSON-based parent_id filtering (no complex graph traversal!)
+        self.data_store.get_child_nodes(date_node_id).await
     }
 }
 
@@ -752,6 +669,15 @@ pub trait CoreLogic: Send + Sync {
 
     /// Retrieve a node by ID
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>>;
+
+    /// NEW: Hybrid search (semantic + structural constraints)
+    async fn hybrid_search(
+        &self,
+        query: &str,
+        node_type_filter: Option<String>,
+        metadata_filter: Option<serde_json::Value>,
+        limit: usize,
+    ) -> NodeSpaceResult<Vec<SearchResult>>;
 }
 
 /// Enhanced RAG orchestration service for AIChatNode functionality
@@ -809,22 +735,28 @@ pub struct QueryResponse {
 impl CoreLogic for ServiceContainer {
     async fn get_nodes_for_date(&self, date: &str) -> NodeSpaceResult<Vec<Node>> {
         // Use the specialized DataStore method
-        DateNavigation::get_nodes_for_date(self, date.parse().map_err(|_| NodeSpaceError::ProcessingError("Invalid date format".into()))?).await
+        DateNavigation::get_nodes_for_date(
+            self,
+            date.parse()
+                .map_err(|_| NodeSpaceError::ProcessingError("Invalid date format".into()))?,
+        )
+        .await
     }
 
     async fn create_text_node(&self, content: &str, date: &str) -> NodeSpaceResult<NodeId> {
-        // Generate embedding first
-        let _embedding = self.nlp_engine.generate_embedding(content).await?;
+        // Generate embedding for vector-first storage in LanceDB
+        let embedding = self.nlp_engine.generate_embedding(content).await?;
 
-        // Create node with embedding and metadata
+        // Create node with metadata for simplified relationship model
         let node = Node::new(serde_json::Value::String(content.to_string()))
             .with_metadata(serde_json::json!({"parent_date": date}));
 
         let node_id = node.id.clone();
 
-        // Store node with embedding using the data store's method
-        // Store node with embedding in internal storage (embedding not used for now)
-        self.store_node_internal(node).await?;
+        // Store node with embedding using LanceDB's native vector storage
+        self.data_store
+            .store_node_with_embedding(node, embedding)
+            .await?;
 
         Ok(node_id)
     }
@@ -834,28 +766,23 @@ impl CoreLogic for ServiceContainer {
         query: &str,
         limit: usize,
     ) -> NodeSpaceResult<Vec<SearchResult>> {
-        // Generate query embedding
-        let _query_embedding = self.nlp_engine.generate_embedding(query).await?;
+        // ENHANCED: Semantic search as primary capability (vector-first approach)
+        // Generate query embedding for true semantic similarity
+        let query_embedding = self.nlp_engine.generate_embedding(query).await?;
 
-        // For MVP: Simple text search through internal storage
-        let storage = self.internal_storage.read().await;
-        let search_results = storage
-            .values()
-            .filter(|node| {
-                // Simple text matching in content
-                if let Some(text) = node.content.as_str() {
-                    text.to_lowercase().contains(&query.to_lowercase())
-                } else if let Some(text) = node.content.get("text") {
-                    text.as_str().unwrap_or("").to_lowercase().contains(&query.to_lowercase())
-                } else {
-                    false
-                }
-            })
-            .take(limit)
-            .map(|node| SearchResult {
+        // Direct vector search using LanceDB's native vector capabilities
+        // (no complex workarounds needed!)
+        let results = self
+            .data_store
+            .semantic_search_with_embedding(query_embedding, limit)
+            .await?;
+
+        let search_results = results
+            .into_iter()
+            .map(|(node, score)| SearchResult {
                 node_id: node.id.clone(),
-                node: node.clone(),
-                score: 0.8, // Placeholder score
+                node,
+                score,
             })
             .collect();
 
@@ -867,7 +794,8 @@ impl CoreLogic for ServiceContainer {
         let rag_response = self.process_simple_query(query).await?;
 
         // Extract source IDs from the enhanced response
-        let sources: Vec<NodeId> = rag_response.sources
+        let sources: Vec<NodeId> = rag_response
+            .sources
             .iter()
             .map(|node| node.id.clone())
             .collect();
@@ -898,39 +826,35 @@ impl CoreLogic for ServiceContainer {
     }
 
     async fn add_child_node(&self, parent_id: &NodeId, child_id: &NodeId) -> NodeSpaceResult<()> {
-        // Update child node to reference parent in universal schema
-        let mut storage = self.internal_storage.write().await;
-        
-        if let Some(child_node) = storage.get_mut(child_id) {
-            // Add parent_id to child's content or metadata
-            if let Some(content_obj) = child_node.content.as_object_mut() {
-                content_obj.insert("parent_id".to_string(), serde_json::Value::String(parent_id.to_string()));
-            } else {
-                // If content is not an object, wrap it
-                let old_content = child_node.content.clone();
-                child_node.content = serde_json::json!({
-                    "content": old_content,
-                    "parent_id": parent_id.to_string()
-                });
-            }
-            child_node.touch();
-        }
-        
-        Ok(())
+        // Use LanceDB data store's simplified relationship creation
+        // JSON-based relationship (replaces complex SurrealDB RELATE operations)
+        self.data_store
+            .create_relationship(parent_id, child_id, "contains")
+            .await
     }
 
     async fn get_child_nodes(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
-        // Use the DataStore method to get children via relationships
-        // For date nodes, use get_date_children; for other nodes, use a query
-        let _parent_str = parent_id.to_string();
-
-        // Use internal helper for all nodes (dates and others)
-        self.get_child_nodes_internal(parent_id).await
+        // Use LanceDB data store's simplified relationship model
+        // Single query with JSON-based filtering (replaces complex SurrealDB graph traversal)
+        self.data_store.get_child_nodes(parent_id).await
     }
 
     async fn update_node(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
-        // Use internal helper to update node
-        self.update_node_internal(node_id, content).await
+        // Get the existing node, update its content, and store it back
+        if let Some(mut node) = self.data_store.get_node(node_id).await? {
+            node.content = serde_json::json!({
+                "text": content,
+                "type": node.content.get("type").unwrap_or(&serde_json::Value::String("text".to_string()))
+            });
+            node.touch();
+            self.data_store.store_node(node).await?;
+            Ok(())
+        } else {
+            Err(NodeSpaceError::NotFound(format!(
+                "Node {} not found",
+                node_id
+            )))
+        }
     }
 
     async fn make_siblings(
@@ -938,42 +862,67 @@ impl CoreLogic for ServiceContainer {
         left_node_id: &NodeId,
         right_node_id: &NodeId,
     ) -> NodeSpaceResult<()> {
-        // For now, implement a basic sibling relationship using the data store
-        // Note: This requires the Node structure to have sibling pointer fields (NS-45)
-        // Until then, we'll create relationships in the database
-
-        // Validate both nodes exist
-        let _left_node = self
-            .get_node_internal(left_node_id)
+        // Validate both nodes exist using LanceDB data store
+        let mut left_node = self
+            .data_store
+            .get_node(left_node_id)
             .await?
             .ok_or_else(|| {
                 NodeSpaceError::NotFound(format!("Left node {} not found", left_node_id))
             })?;
-        let _right_node = self
-            .get_node_internal(right_node_id)
+        let mut right_node = self
+            .data_store
+            .get_node(right_node_id)
             .await?
             .ok_or_else(|| {
                 NodeSpaceError::NotFound(format!("Right node {} not found", right_node_id))
             })?;
 
         // Update sibling pointers in the nodes themselves (using Node struct fields)
-        let mut storage = self.internal_storage.write().await;
-        
-        if let Some(left_node) = storage.get_mut(left_node_id) {
-            left_node.next_sibling = Some(right_node_id.clone());
-            left_node.touch();
-        }
-        
-        if let Some(right_node) = storage.get_mut(right_node_id) {
-            right_node.previous_sibling = Some(left_node_id.clone());
-            right_node.touch();
-        }
+        left_node.next_sibling = Some(right_node_id.clone());
+        left_node.touch();
+
+        right_node.previous_sibling = Some(left_node_id.clone());
+        right_node.touch();
+
+        // Store updated nodes back to LanceDB
+        self.data_store.store_node(left_node).await?;
+        self.data_store.store_node(right_node).await?;
 
         Ok(())
     }
 
     async fn get_node(&self, node_id: &NodeId) -> NodeSpaceResult<Option<Node>> {
-        self.get_node_internal(node_id).await
+        // Use LanceDB data store to get node directly
+        self.data_store.get_node(node_id).await
+    }
+
+    async fn hybrid_search(
+        &self,
+        query: &str,
+        node_type_filter: Option<String>,
+        metadata_filter: Option<serde_json::Value>,
+        limit: usize,
+    ) -> NodeSpaceResult<Vec<SearchResult>> {
+        // Generate query embedding for semantic component
+        let query_embedding = self.nlp_engine.generate_embedding(query).await?;
+
+        // Use LanceDB's hybrid search combining vector similarity with metadata filtering
+        let results = self
+            .data_store
+            .hybrid_search(query_embedding, node_type_filter, metadata_filter, limit)
+            .await?;
+
+        let search_results = results
+            .into_iter()
+            .map(|(node, score)| SearchResult {
+                node_id: node.id.clone(),
+                node,
+                score,
+            })
+            .collect();
+
+        Ok(search_results)
     }
 }
 
@@ -989,7 +938,9 @@ impl RAGService for ServiceContainer {
                 &request.query,
                 &request.conversation_history,
                 request.date_scope.as_deref(),
-                request.max_results.unwrap_or(self.rag_config.max_retrieval_results),
+                request
+                    .max_results
+                    .unwrap_or(self.rag_config.max_retrieval_results),
             )
             .await?;
 
@@ -1055,7 +1006,11 @@ impl RAGService for ServiceContainer {
             if recent_context.is_empty() {
                 query.to_string()
             } else {
-                format!("{}\n\nRecent conversation context: {}", query, recent_context.join("; "))
+                format!(
+                    "{}\n\nRecent conversation context: {}",
+                    query,
+                    recent_context.join("; ")
+                )
             }
         };
 
@@ -1103,12 +1058,13 @@ impl RAGService for ServiceContainer {
         config: &RAGConfig,
     ) -> NodeSpaceResult<(String, TokenBudget, Vec<Node>)> {
         // Calculate token budget
-        let mut token_budget = self.calculate_token_budget(conversation_history, &retrieved_nodes, config);
+        let mut token_budget =
+            self.calculate_token_budget(conversation_history, &retrieved_nodes, config);
 
         // Prioritize and truncate sources to fit budget
         let mut selected_sources = Vec::new();
         let mut knowledge_tokens = 0;
-        
+
         for (node, _score) in retrieved_nodes.iter() {
             if let Some(content) = node.content.as_str() {
                 let estimated_tokens = content.len() / 4; // Rough token estimation
@@ -1138,7 +1094,10 @@ impl RAGService for ServiceContainer {
             .rev()
             .collect();
 
-        let conversation_tokens: usize = recent_messages.iter().map(|msg| msg.content.len() / 4).sum();
+        let conversation_tokens: usize = recent_messages
+            .iter()
+            .map(|msg| msg.content.len() / 4)
+            .sum();
         token_budget.allocate_conversation_tokens(conversation_tokens);
 
         // Assemble the final prompt
@@ -1188,7 +1147,11 @@ impl RAGService for ServiceContainer {
         config: &RAGConfig,
     ) -> TokenBudget {
         // Use model's context window from performance config or default
-        let total_tokens = self.config.performance_config.context_window.unwrap_or(4096);
+        let total_tokens = self
+            .config
+            .performance_config
+            .context_window
+            .unwrap_or(4096);
         let reserved_tokens = config.reserved_response_tokens;
 
         let mut budget = TokenBudget::new(total_tokens, reserved_tokens);
@@ -1198,7 +1161,7 @@ impl RAGService for ServiceContainer {
             .iter()
             .map(|msg| msg.content.len() / 4) // Rough token estimation
             .sum();
-        
+
         // Estimate knowledge tokens
         let knowledge_tokens: usize = retrieved_nodes
             .iter()
@@ -1206,7 +1169,9 @@ impl RAGService for ServiceContainer {
             .map(|content| content.len() / 4)
             .sum();
 
-        budget.allocate_conversation_tokens(conversation_tokens.min(budget.available_for_context() / 2));
+        budget.allocate_conversation_tokens(
+            conversation_tokens.min(budget.available_for_context() / 2),
+        );
         budget.allocate_knowledge_tokens(knowledge_tokens.min(budget.available_for_context() / 2));
 
         budget
