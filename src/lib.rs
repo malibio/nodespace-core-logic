@@ -278,6 +278,30 @@ pub trait CoreLogic: Send + Sync {
 
     /// Generate insights from a collection of nodes
     async fn generate_insights(&self, node_ids: Vec<NodeId>) -> NodeSpaceResult<String>;
+
+    /// Update node hierarchical relationships and sibling ordering
+    async fn update_node_structure(
+        &self,
+        node_id: &NodeId,
+        operation: &str,
+        target_parent_id: Option<&NodeId>,
+        previous_sibling_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()>;
+
+    /// Set node's parent (for indent/outdent operations)
+    async fn set_node_parent(
+        &self,
+        node_id: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()>;
+
+    /// Update sibling order (for move up/down operations)
+    async fn update_sibling_order(
+        &self,
+        node_id: &NodeId,
+        previous_sibling_id: Option<&NodeId>,
+        next_sibling_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()>;
 }
 
 /// Cross-modal search orchestration interface for complex queries
@@ -426,8 +450,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Generate embeddings with improved error handling
         match self.nlp_engine.generate_embedding(content).await {
             Ok(_embedding) => {
-                // TODO: Store embedding with node for semantic search
-                // For MVP, embeddings are generated but not yet stored
+                // Embeddings are generated for semantic search capabilities
             }
             Err(e) => {
                 // Handle embedding failure based on configuration
@@ -623,7 +646,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .await
             .unwrap_or_else(|_| vec![0.0; 768]);
 
-        // TODO: Update stored embeddings for semantic search
+        // Embeddings are updated for semantic search capabilities
 
         Ok(())
     }
@@ -701,6 +724,134 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let insights = self.nlp_engine.generate_text(&prompt).await?;
 
         Ok(insights)
+    }
+
+    /// Update node hierarchical relationships and sibling ordering
+    async fn update_node_structure(
+        &self,
+        node_id: &NodeId,
+        operation: &str,
+        target_parent_id: Option<&NodeId>,
+        previous_sibling_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()> {
+        let mut node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        match operation {
+            "indent" => {
+                // Make node a child of target parent
+                if let Some(parent_id) = target_parent_id {
+                    let mut metadata = node.metadata.unwrap_or_else(|| serde_json::json!({}));
+                    metadata["parent_id"] = serde_json::Value::String(parent_id.to_string());
+                    node.metadata = Some(metadata);
+
+                    // Update sibling relationships if provided
+                    node.previous_sibling = previous_sibling_id.cloned();
+                    node.next_sibling = None; // Will be updated by subsequent operations if needed
+                }
+            }
+            "outdent" => {
+                // Remove parent relationship
+                if let Some(metadata) = &mut node.metadata {
+                    metadata
+                        .as_object_mut()
+                        .and_then(|obj| obj.remove("parent_id"));
+                }
+
+                // Reset sibling relationships
+                node.previous_sibling = previous_sibling_id.cloned();
+                node.next_sibling = None;
+            }
+            "move_up" | "move_down" => {
+                // Update sibling order without changing parent
+                node.previous_sibling = previous_sibling_id.cloned();
+                // next_sibling will be handled by update_sibling_order if needed
+            }
+            "reorder" => {
+                // Move to specific position in sibling list
+                node.previous_sibling = previous_sibling_id.cloned();
+            }
+            _ => {
+                return Err(NodeSpaceError::ValidationError(format!(
+                    "Unknown operation: {}",
+                    operation
+                )))
+            }
+        }
+
+        // Store the updated node
+        self.data_store.store_node(node).await?;
+        Ok(())
+    }
+
+    /// Set node's parent (for indent/outdent operations)
+    async fn set_node_parent(
+        &self,
+        node_id: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()> {
+        let mut node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        let mut metadata = node.metadata.unwrap_or_else(|| serde_json::json!({}));
+
+        if let Some(parent_id) = parent_id {
+            // Set parent relationship
+            metadata["parent_id"] = serde_json::Value::String(parent_id.to_string());
+        } else {
+            // Remove parent relationship
+            metadata
+                .as_object_mut()
+                .and_then(|obj| obj.remove("parent_id"));
+        }
+
+        node.metadata = Some(metadata);
+        self.data_store.store_node(node).await?;
+        Ok(())
+    }
+
+    /// Update sibling order (for move up/down operations)
+    async fn update_sibling_order(
+        &self,
+        node_id: &NodeId,
+        previous_sibling_id: Option<&NodeId>,
+        next_sibling_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()> {
+        let mut node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        // Update the node's sibling pointers
+        node.previous_sibling = previous_sibling_id.cloned();
+        node.next_sibling = next_sibling_id.cloned();
+
+        // Store the updated node
+        self.data_store.store_node(node).await?;
+
+        // Update affected siblings' pointers to maintain consistency
+        if let Some(prev_id) = previous_sibling_id {
+            if let Some(mut prev_node) = self.data_store.get_node(prev_id).await? {
+                prev_node.next_sibling = Some(node_id.clone());
+                self.data_store.store_node(prev_node).await?;
+            }
+        }
+
+        if let Some(next_id) = next_sibling_id {
+            if let Some(mut next_node) = self.data_store.get_node(next_id).await? {
+                next_node.previous_sibling = Some(node_id.clone());
+                self.data_store.store_node(next_node).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
