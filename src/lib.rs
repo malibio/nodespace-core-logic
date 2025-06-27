@@ -452,12 +452,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             limit
         };
 
-        // For MVP, fall back to text-based search until vector search is implemented
-        let search_query = format!(
-            "SELECT * FROM nodes WHERE content CONTAINS '{}' LIMIT {}",
-            query, effective_limit
-        );
-        let nodes = self.data_store.query_nodes(&search_query).await?;
+        // For LanceDB: Simple content search using query_nodes
+        let all_nodes = self.data_store.query_nodes(query).await?;
+        let nodes: Vec<_> = all_nodes.into_iter().take(effective_limit).collect();
 
         // Convert to SearchResult with basic scoring
         let mut results = Vec::new();
@@ -616,7 +613,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         relationship_types: Vec<String>,
     ) -> NodeSpaceResult<Vec<NodeId>> {
         // For MVP, use a simple query to find related nodes
-        let relationship_filters = if relationship_types.is_empty() {
+        let _relationship_filters = if relationship_types.is_empty() {
             "".to_string()
         } else {
             format!(
@@ -629,19 +626,25 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             )
         };
 
-        let query = format!(
-            "SELECT out FROM {} WHERE in = nodes:{}{}",
-            "relationships", // Assuming relationship table name
-            node_id,
-            relationship_filters
-        );
-
-        // Execute query and extract node IDs
-        let result_nodes = self
-            .data_store
-            .query_nodes(&query)
-            .await
-            .unwrap_or_default(); // Gracefully handle relationship query failures
+        // For LanceDB: relationships are stored in metadata, not separate tables
+        // Get all nodes and filter by relationships in metadata
+        let all_nodes = self.data_store.query_nodes("").await.unwrap_or_default();
+        let result_nodes: Vec<_> = all_nodes
+            .into_iter()
+            .filter(|node| {
+                // Check if this node has a relationship to our target node
+                if let Some(metadata) = &node.metadata {
+                    if let Some(mentions) = metadata.get("mentions") {
+                        if let Some(mentions_array) = mentions.as_array() {
+                            return mentions_array
+                                .iter()
+                                .any(|mention| mention.as_str() == Some(node_id.as_str()));
+                        }
+                    }
+                }
+                false
+            })
+            .collect();
 
         let related_ids: Vec<NodeId> = result_nodes.into_iter().map(|node| node.id).collect();
 
@@ -747,8 +750,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
     }
 
     async fn search_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>> {
-        let search_query = format!("SELECT * FROM nodes WHERE content CONTAINS '{}'", query);
-        self.data_store.query_nodes(&search_query).await
+        // For LanceDB: Simple content search
+        self.data_store.query_nodes(query).await
     }
 
     async fn process_rag_query(&self, query: &str) -> NodeSpaceResult<String> {
@@ -774,16 +777,27 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
     for NodeSpaceService<D, N>
 {
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>> {
-        let date_str = date.format("%Y-%m-%d").to_string();
+        // For LanceDB: Get all nodes and filter by created_at date
+        // The LanceDB implementation currently uses simple in-memory HashMap storage
+        let all_nodes = self.data_store.query_nodes("").await?; // Empty query returns all nodes
 
-        // Query for all text nodes that have the specified date as parent
-        let query = format!(
-            "SELECT * FROM text WHERE parent_node = (SELECT id FROM date WHERE date_value = '{}' LIMIT 1)",
-            date_str
-        );
+        // Filter nodes by created_at date
+        let filtered_nodes: Vec<Node> = all_nodes
+            .into_iter()
+            .filter(|node| {
+                // Parse the created_at timestamp and compare dates
+                if let Ok(node_datetime) = chrono::DateTime::parse_from_rfc3339(&node.created_at) {
+                    node_datetime.date_naive() == date
+                } else {
+                    // Fallback: try parsing as date-only string
+                    node
+                        .created_at
+                        .starts_with(&date.format("%Y-%m-%d").to_string())
+                }
+            })
+            .collect();
 
-        let nodes = self.data_store.query_nodes(&query).await?;
-        Ok(nodes)
+        Ok(filtered_nodes)
     }
 
     async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
@@ -808,79 +822,86 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
         &self,
         current_date: NaiveDate,
     ) -> NodeSpaceResult<Option<NaiveDate>> {
-        let current_str = current_date.format("%Y-%m-%d").to_string();
+        // For LanceDB: Get all nodes and find dates with content
+        let all_nodes = self.data_store.query_nodes("").await?;
 
-        // Find the latest date before the current date that has content
-        let query = format!(
-            "SELECT date_value FROM date WHERE date_value < '{}' AND id IN (SELECT DISTINCT parent_node FROM text) ORDER BY date_value DESC LIMIT 1",
-            current_str
-        );
-
-        let result_nodes = self.data_store.query_nodes(&query).await?;
-
-        if let Some(node) = result_nodes.first() {
-            if let Some(date_str) = node.content.as_str() {
-                if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    return Ok(Some(parsed_date));
+        let mut dates_with_content = Vec::new();
+        for node in all_nodes {
+            if let Ok(node_datetime) = chrono::DateTime::parse_from_rfc3339(&node.created_at) {
+                let node_date = node_datetime.date_naive();
+                if node_date < current_date && !dates_with_content.contains(&node_date) {
+                    dates_with_content.push(node_date);
                 }
             }
         }
 
-        Ok(None)
+        // Return the latest date before current_date
+        dates_with_content.sort();
+        Ok(dates_with_content.into_iter().next_back())
     }
 
     async fn get_next_day(&self, current_date: NaiveDate) -> NodeSpaceResult<Option<NaiveDate>> {
-        let current_str = current_date.format("%Y-%m-%d").to_string();
+        // For LanceDB: Get all nodes and find dates with content
+        let all_nodes = self.data_store.query_nodes("").await?;
 
-        // Find the earliest date after the current date that has content
-        let query = format!(
-            "SELECT date_value FROM date WHERE date_value > '{}' AND id IN (SELECT DISTINCT parent_node FROM text) ORDER BY date_value ASC LIMIT 1",
-            current_str
-        );
-
-        let result_nodes = self.data_store.query_nodes(&query).await?;
-
-        if let Some(node) = result_nodes.first() {
-            if let Some(date_str) = node.content.as_str() {
-                if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    return Ok(Some(parsed_date));
+        let mut dates_with_content = Vec::new();
+        for node in all_nodes {
+            if let Ok(node_datetime) = chrono::DateTime::parse_from_rfc3339(&node.created_at) {
+                let node_date = node_datetime.date_naive();
+                if node_date > current_date && !dates_with_content.contains(&node_date) {
+                    dates_with_content.push(node_date);
                 }
             }
         }
 
-        Ok(None)
+        // Return the earliest date after current_date
+        dates_with_content.sort();
+        Ok(dates_with_content.into_iter().next())
     }
 
     async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode> {
         let date_str = date.format("%Y-%m-%d").to_string();
 
-        // First, try to find existing date node
-        let query = format!("SELECT * FROM date WHERE date_value = '{}'", date_str);
-        let existing_nodes = self.data_store.query_nodes(&query).await?;
+        // For LanceDB: Find existing date node by metadata
+        let all_nodes = self.data_store.query_nodes("").await?;
 
-        if let Some(existing_node) = existing_nodes.first() {
-            // Get child count
-            let count_query = format!(
-                "SELECT COUNT() AS count FROM text WHERE parent_node = '{}'",
-                existing_node.id
-            );
-            let count_result = self.data_store.query_nodes(&count_query).await?;
-            let child_count = count_result
-                .first()
-                .and_then(|n| n.content.as_u64())
-                .unwrap_or(0) as usize;
+        // Look for a node with node_type="date" and matching date content
+        for node in &all_nodes {
+            if let Some(metadata) = &node.metadata {
+                if let Some(node_type) = metadata.get("node_type") {
+                    if node_type.as_str() == Some("date") {
+                        if let Some(content_str) = node.content.as_str() {
+                            if content_str == date_str {
+                                // Count child nodes for this date
+                                let child_count = all_nodes
+                                    .iter()
+                                    .filter(|n| {
+                                        if let Some(n_meta) = &n.metadata {
+                                            if let Some(parent) = n_meta.get("parent_id") {
+                                                parent.as_str() == Some(node.id.as_str())
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    })
+                                    .count();
 
-            return Ok(DateNode {
-                id: existing_node.id.clone(),
-                date,
-                description: existing_node
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("description"))
-                    .and_then(|d| d.as_str())
-                    .map(|s| s.to_string()),
-                child_count,
-            });
+                                return Ok(DateNode {
+                                    id: node.id.clone(),
+                                    date,
+                                    description: metadata
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .map(|s| s.to_string()),
+                                    child_count,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Create new date node if it doesn't exist
@@ -913,13 +934,26 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
     }
 
     async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
-        // Query for all nodes that have this date node as their parent
-        let query = format!(
-            "SELECT * FROM text WHERE parent_node = '{}' ORDER BY created_at ASC",
-            date_node_id
-        );
+        // For LanceDB: Find child nodes by parent_id in metadata
+        let all_nodes = self.data_store.query_nodes("").await?;
 
-        let children = self.data_store.query_nodes(&query).await?;
+        let mut children: Vec<Node> = all_nodes
+            .into_iter()
+            .filter(|node| {
+                if let Some(metadata) = &node.metadata {
+                    if let Some(parent_id) = metadata.get("parent_id") {
+                        parent_id.as_str() == Some(date_node_id.as_str())
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        // Sort by created_at
+        children.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(children)
     }
 }
@@ -1269,12 +1303,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
 
     /// Search nodes by entity mentions
     async fn search_by_entity(&self, entity: &str) -> NodeSpaceResult<Vec<SearchResult>> {
-        let query = format!(
-            "SELECT * FROM nodes WHERE content CONTAINS '{}' LIMIT 10",
-            entity
-        );
-
-        let nodes = self.data_store.query_nodes(&query).await?;
+        // For LanceDB: Simple content search by entity
+        let all_nodes = self.data_store.query_nodes(entity).await?;
+        let nodes: Vec<_> = all_nodes.into_iter().take(10).collect();
         let results = nodes
             .into_iter()
             .enumerate()
@@ -1303,12 +1334,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             TemporalType::Exact | TemporalType::Relative => {
                 if let Some(date) = temporal_ref.parsed_date {
                     let date_str = date.format("%Y-%m-%d").to_string();
-                    let query = format!(
-                        "SELECT * FROM nodes WHERE created_at LIKE '{}%' LIMIT 10",
-                        date_str
-                    );
-
-                    let nodes = self.data_store.query_nodes(&query).await?;
+                    // For LanceDB: Get all nodes and filter by date
+                    let all_nodes = self.data_store.query_nodes("").await?;
+                    let nodes: Vec<_> = all_nodes
+                        .into_iter()
+                        .filter(|node| node.created_at.starts_with(&date_str))
+                        .take(10)
+                        .collect();
                     let results = nodes
                         .into_iter()
                         .enumerate()

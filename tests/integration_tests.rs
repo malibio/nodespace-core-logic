@@ -104,23 +104,39 @@ impl DataStore for MockDataStore {
     }
 
     // Cross-modal search methods (NS-81 support)
-    async fn create_image_node(&self, _image_node: nodespace_data_store::ImageNode) -> NodeSpaceResult<String> {
+    async fn create_image_node(
+        &self,
+        _image_node: nodespace_data_store::ImageNode,
+    ) -> NodeSpaceResult<String> {
         Ok("mock-image-node-id".to_string())
     }
 
-    async fn get_image_node(&self, _id: &str) -> NodeSpaceResult<Option<nodespace_data_store::ImageNode>> {
+    async fn get_image_node(
+        &self,
+        _id: &str,
+    ) -> NodeSpaceResult<Option<nodespace_data_store::ImageNode>> {
         Ok(None) // Mock returns no image node
     }
 
-    async fn search_multimodal(&self, _query_embedding: Vec<f32>, _types: Vec<nodespace_data_store::NodeType>) -> NodeSpaceResult<Vec<Node>> {
+    async fn search_multimodal(
+        &self,
+        _query_embedding: Vec<f32>,
+        _types: Vec<nodespace_data_store::NodeType>,
+    ) -> NodeSpaceResult<Vec<Node>> {
         let nodes = self.nodes.read().await;
         Ok(nodes.clone())
     }
 
-    async fn hybrid_multimodal_search(&self, _query_embedding: Vec<f32>, _config: &nodespace_data_store::HybridSearchConfig) -> NodeSpaceResult<Vec<nodespace_data_store::SearchResult>> {
+    async fn hybrid_multimodal_search(
+        &self,
+        _query_embedding: Vec<f32>,
+        _config: &nodespace_data_store::HybridSearchConfig,
+    ) -> NodeSpaceResult<Vec<nodespace_data_store::SearchResult>> {
         let nodes = self.nodes.read().await;
-        let results = nodes.iter().enumerate().map(|(index, node)| {
-            nodespace_data_store::SearchResult {
+        let results = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| nodespace_data_store::SearchResult {
                 node: node.clone(),
                 score: 0.9 - (index as f32 * 0.1),
                 relevance_factors: nodespace_data_store::RelevanceFactors {
@@ -129,8 +145,8 @@ impl DataStore for MockDataStore {
                     temporal_score: 0.6,
                     cross_modal_score: Some(0.5),
                 },
-            }
-        }).collect();
+            })
+            .collect();
         Ok(results)
     }
 }
