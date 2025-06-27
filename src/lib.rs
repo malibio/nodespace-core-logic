@@ -113,7 +113,62 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
             state: Arc::new(RwLock::new(ServiceState::Uninitialized)),
         }
     }
+}
 
+impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine::LocalNLPEngine> {
+    /// Factory method for service container dependency injection
+    /// Creates a fully configured NodeSpace service with database and model paths
+    pub async fn create_with_paths(
+        database_path: &str,
+        model_directory: Option<&str>,
+    ) -> NodeSpaceResult<Self> {
+        use nodespace_data_store::LanceDataStore;
+        use nodespace_nlp_engine::LocalNLPEngine;
+
+        // Initialize data store with injected database path
+        let data_store = LanceDataStore::new(database_path).await.map_err(|e| {
+            NodeSpaceError::InternalError(format!(
+                "Failed to initialize data store at '{}': {}",
+                database_path, e
+            ))
+        })?;
+
+        // Initialize NLP engine with optional model directory
+        let nlp_engine = if let Some(model_dir) = model_directory {
+            LocalNLPEngine::with_model_directory(model_dir)
+        } else {
+            LocalNLPEngine::new() // Uses smart path resolution
+        };
+
+        Ok(Self::new(data_store, nlp_engine))
+    }
+
+    /// Factory method for development environment
+    /// Uses default development paths
+    pub async fn create_for_development() -> NodeSpaceResult<Self> {
+        Self::create_with_paths("../data/lance_db/development.db", Some("../models")).await
+    }
+
+    /// Factory method for testing environment
+    /// Uses in-memory database and test model paths
+    pub async fn create_for_testing() -> NodeSpaceResult<Self> {
+        Self::create_with_paths(
+            "memory", None, // Use smart path resolution for tests
+        )
+        .await
+    }
+
+    /// Factory method for production environment
+    /// Uses environment variables or explicit paths
+    pub async fn create_for_production(
+        database_path: &str,
+        model_directory: &str,
+    ) -> NodeSpaceResult<Self> {
+        Self::create_with_paths(database_path, Some(model_directory)).await
+    }
+}
+
+impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
     /// Initialize the service and load models
     pub async fn initialize(&self) -> NodeSpaceResult<()> {
         // Update state to initializing
@@ -266,22 +321,6 @@ pub trait DateNavigation: Send + Sync {
     /// Get all text nodes for a specific date
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>>;
 
-    /// Switch to viewing a specific date with navigation context
-    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult>;
-
-    /// Navigate to previous day with content
-    async fn get_previous_day(&self, current_date: NaiveDate)
-        -> NodeSpaceResult<Option<NaiveDate>>;
-
-    /// Navigate to next day with content
-    async fn get_next_day(&self, current_date: NaiveDate) -> NodeSpaceResult<Option<NaiveDate>>;
-
-    /// Ensure date node exists for organization
-    async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode>;
-
-    /// Get all child nodes of a date node (hierarchical retrieval)
-    async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
-
     /// Get today's date for navigation
     fn get_today() -> NaiveDate {
         chrono::Utc::now().date_naive()
@@ -349,24 +388,6 @@ pub struct QueryResponse {
     pub sources: Vec<NodeId>,
     pub confidence: f32,
     pub related_queries: Vec<String>,
-}
-
-/// Navigation result for date operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NavigationResult {
-    pub date: NaiveDate,
-    pub nodes: Vec<Node>,
-    pub has_previous: bool,
-    pub has_next: bool,
-}
-
-/// Date node for organizing hierarchical content
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateNode {
-    pub id: NodeId,
-    pub date: NaiveDate,
-    pub description: Option<String>,
-    pub child_count: usize,
 }
 
 #[async_trait]
@@ -778,183 +799,36 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
 {
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>> {
         // For LanceDB: Get all nodes and filter by created_at date
-        // The LanceDB implementation currently uses simple in-memory HashMap storage
+        // IMPORTANT: Only return top-level nodes (nodes without parent_id) to preserve hierarchy
         let all_nodes = self.data_store.query_nodes("").await?; // Empty query returns all nodes
 
-        // Filter nodes by created_at date
+        // Filter nodes by created_at date AND only return top-level nodes
         let filtered_nodes: Vec<Node> = all_nodes
             .into_iter()
             .filter(|node| {
-                // Parse the created_at timestamp and compare dates
-                if let Ok(node_datetime) = chrono::DateTime::parse_from_rfc3339(&node.created_at) {
+                // Date filter: Parse the created_at timestamp and compare dates
+                let matches_date = if let Ok(node_datetime) =
+                    chrono::DateTime::parse_from_rfc3339(&node.created_at)
+                {
                     node_datetime.date_naive() == date
                 } else {
                     // Fallback: try parsing as date-only string
-                    node
-                        .created_at
+                    node.created_at
                         .starts_with(&date.format("%Y-%m-%d").to_string())
-                }
+                };
+
+                // Hierarchy filter: Only return top-level nodes (no parent_id in metadata)
+                let is_top_level = if let Some(metadata) = &node.metadata {
+                    metadata.get("parent_id").is_none()
+                } else {
+                    true // No metadata = top-level node
+                };
+
+                matches_date && is_top_level
             })
             .collect();
 
         Ok(filtered_nodes)
-    }
-
-    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
-        // Get nodes for the specified date
-        let nodes = self.get_nodes_for_date(date).await?;
-
-        // Check if there's a previous day with content
-        let has_previous = (self.get_previous_day(date).await?).is_some();
-
-        // Check if there's a next day with content
-        let has_next = (self.get_next_day(date).await?).is_some();
-
-        Ok(NavigationResult {
-            date,
-            nodes,
-            has_previous,
-            has_next,
-        })
-    }
-
-    async fn get_previous_day(
-        &self,
-        current_date: NaiveDate,
-    ) -> NodeSpaceResult<Option<NaiveDate>> {
-        // For LanceDB: Get all nodes and find dates with content
-        let all_nodes = self.data_store.query_nodes("").await?;
-
-        let mut dates_with_content = Vec::new();
-        for node in all_nodes {
-            if let Ok(node_datetime) = chrono::DateTime::parse_from_rfc3339(&node.created_at) {
-                let node_date = node_datetime.date_naive();
-                if node_date < current_date && !dates_with_content.contains(&node_date) {
-                    dates_with_content.push(node_date);
-                }
-            }
-        }
-
-        // Return the latest date before current_date
-        dates_with_content.sort();
-        Ok(dates_with_content.into_iter().next_back())
-    }
-
-    async fn get_next_day(&self, current_date: NaiveDate) -> NodeSpaceResult<Option<NaiveDate>> {
-        // For LanceDB: Get all nodes and find dates with content
-        let all_nodes = self.data_store.query_nodes("").await?;
-
-        let mut dates_with_content = Vec::new();
-        for node in all_nodes {
-            if let Ok(node_datetime) = chrono::DateTime::parse_from_rfc3339(&node.created_at) {
-                let node_date = node_datetime.date_naive();
-                if node_date > current_date && !dates_with_content.contains(&node_date) {
-                    dates_with_content.push(node_date);
-                }
-            }
-        }
-
-        // Return the earliest date after current_date
-        dates_with_content.sort();
-        Ok(dates_with_content.into_iter().next())
-    }
-
-    async fn create_or_get_date_node(&self, date: NaiveDate) -> NodeSpaceResult<DateNode> {
-        let date_str = date.format("%Y-%m-%d").to_string();
-
-        // For LanceDB: Find existing date node by metadata
-        let all_nodes = self.data_store.query_nodes("").await?;
-
-        // Look for a node with node_type="date" and matching date content
-        for node in &all_nodes {
-            if let Some(metadata) = &node.metadata {
-                if let Some(node_type) = metadata.get("node_type") {
-                    if node_type.as_str() == Some("date") {
-                        if let Some(content_str) = node.content.as_str() {
-                            if content_str == date_str {
-                                // Count child nodes for this date
-                                let child_count = all_nodes
-                                    .iter()
-                                    .filter(|n| {
-                                        if let Some(n_meta) = &n.metadata {
-                                            if let Some(parent) = n_meta.get("parent_id") {
-                                                parent.as_str() == Some(node.id.as_str())
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        }
-                                    })
-                                    .count();
-
-                                return Ok(DateNode {
-                                    id: node.id.clone(),
-                                    date,
-                                    description: metadata
-                                        .get("description")
-                                        .and_then(|d| d.as_str())
-                                        .map(|s| s.to_string()),
-                                    child_count,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Create new date node if it doesn't exist
-        let node_id = NodeId::new();
-        let now = chrono::Utc::now().to_rfc3339();
-        let description = format!("{}", date.format("%A, %B %d, %Y"));
-
-        let date_node = Node {
-            id: node_id.clone(),
-            content: serde_json::Value::String(date_str),
-            metadata: Some(serde_json::json!({
-                "description": description,
-                "node_type": "date"
-            })),
-            created_at: now.clone(),
-            updated_at: now,
-            next_sibling: None,
-            previous_sibling: None,
-        };
-
-        // Store the date node
-        self.data_store.store_node(date_node).await?;
-
-        Ok(DateNode {
-            id: node_id,
-            date,
-            description: Some(description),
-            child_count: 0,
-        })
-    }
-
-    async fn get_date_node_children(&self, date_node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
-        // For LanceDB: Find child nodes by parent_id in metadata
-        let all_nodes = self.data_store.query_nodes("").await?;
-
-        let mut children: Vec<Node> = all_nodes
-            .into_iter()
-            .filter(|node| {
-                if let Some(metadata) = &node.metadata {
-                    if let Some(parent_id) = metadata.get("parent_id") {
-                        parent_id.as_str() == Some(date_node_id.as_str())
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        // Sort by created_at
-        children.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        Ok(children)
     }
 }
 
