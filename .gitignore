@@ -1,12 +1,94 @@
 # Rust build artifacts
 /target/
-**/*.rs.bk
 Cargo.lock
+
+# Database files - should not be committed
+/data/
+*.db/
+*.db
 
 # IDE files
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# AI/ML Model Caches (CRITICAL: Prevents large file commits)
+.fastembed_cache/
+.huggingface/
+__pycache__/
+.cache/
+.torch/
+
+# AI Model Files (CRITICAL: Prevents large binary commits)
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.h5
+*.pkl
+*.pickle
+models/
+checkpoints/
+
+# Temporary Directories (CRITICAL: Prevents accidental test repos)
+temp*/
+temp-*/
+tmp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Node.js Dependencies (CRITICAL: Prevents massive node_modules)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# Build Outputs (CRITICAL: Prevents build artifact bloat)
+dist/
+build/
+out/
+
+# Logs (prevents accumulation)
+*.log
+logs/
+log/
+
+# Large file patterns (generic protection)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.dmg
+*.iso
+
+# Development artifacts
+.pytest_cache/
+.coverage
+*.egg-info/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Claude AI artifacts (prevents meta-bloat)
+.claude/
+.aider*
+.cursor*
+
+# Lock files (regenerable)
+poetry.lock
+Pipfile.lock
