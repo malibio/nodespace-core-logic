@@ -225,6 +225,41 @@ pub trait CoreLogic: Send + Sync {
     async fn generate_insights(&self, node_ids: Vec<NodeId>) -> NodeSpaceResult<String>;
 }
 
+/// Cross-modal search orchestration interface for complex queries
+#[async_trait]
+pub trait CrossModalSearch: Send + Sync {
+    /// Intelligent cross-modal search with entity and temporal extraction
+    async fn intelligent_cross_modal_search(
+        &self,
+        query: &str,
+    ) -> NodeSpaceResult<Vec<SearchResult>>;
+
+    /// Extract entities from natural language queries
+    async fn extract_entities(&self, query: &str) -> NodeSpaceResult<ExtractedEntities>;
+
+    /// Extract temporal references from queries
+    async fn extract_temporal_refs(&self, query: &str) -> NodeSpaceResult<Vec<TemporalReference>>;
+
+    /// Extract visual attributes from queries
+    async fn extract_visual_refs(&self, query: &str) -> NodeSpaceResult<VisualAttributes>;
+
+    /// Multi-strategy search coordination
+    async fn multi_strategy_search(
+        &self,
+        query_embedding: Vec<f32>,
+        entities: &ExtractedEntities,
+        temporal_refs: &[TemporalReference],
+        visual_refs: &VisualAttributes,
+    ) -> NodeSpaceResult<Vec<SearchResult>>;
+
+    /// Intelligent result fusion and ranking
+    async fn intelligent_result_fusion(
+        &self,
+        search_results: Vec<SearchResult>,
+        original_query: &str,
+    ) -> NodeSpaceResult<Vec<SearchResult>>;
+}
+
 /// Date navigation operations for hierarchical date-based content organization
 #[async_trait]
 pub trait DateNavigation: Send + Sync {
@@ -259,6 +294,52 @@ pub struct SearchResult {
     pub node_id: NodeId,
     pub node: Node,
     pub score: f32,
+}
+
+/// Cross-modal search entities extracted from queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedEntities {
+    pub people: Vec<String>,
+    pub events: Vec<String>,
+    pub objects: Vec<String>,
+    pub locations: Vec<String>,
+}
+
+/// Temporal references extracted from queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemporalReference {
+    pub raw_text: String,
+    pub parsed_date: Option<NaiveDate>,
+    pub date_range: Option<(NaiveDate, NaiveDate)>,
+    pub temporal_type: TemporalType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TemporalType {
+    Exact,    // "on June 15"
+    Relative, // "yesterday", "last week"
+    Event,    // "during Claire's birthday"
+    Fuzzy,    // "around that time"
+}
+
+/// Visual attributes extracted from queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisualAttributes {
+    pub colors: Vec<String>,
+    pub objects: Vec<String>,
+    pub scene_types: Vec<String>,
+    pub people_descriptions: Vec<String>,
+}
+
+/// Multi-strategy search configuration for intelligent fusion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiStrategyConfig {
+    pub semantic_weight: f32,
+    pub entity_weight: f32,
+    pub temporal_weight: f32,
+    pub visual_weight: f32,
+    pub max_results_per_strategy: usize,
+    pub final_result_limit: usize,
 }
 
 /// Query response with results and context
@@ -840,5 +921,437 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
 
         let children = self.data_store.query_nodes(&query).await?;
         Ok(children)
+    }
+}
+
+/// Cross-modal search orchestration implementation for NodeSpaceService
+#[async_trait]
+impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CrossModalSearch
+    for NodeSpaceService<D, N>
+{
+    async fn intelligent_cross_modal_search(
+        &self,
+        query: &str,
+    ) -> NodeSpaceResult<Vec<SearchResult>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            return Err(NodeSpaceError::InternalError(format!(
+                "Service not ready: {:?}",
+                state
+            )));
+        }
+
+        // Step 1: Extract entities, temporal refs, and visual attributes
+        let entities = self.extract_entities(query).await?;
+        let temporal_refs = self.extract_temporal_refs(query).await?;
+        let visual_refs = self.extract_visual_refs(query).await?;
+
+        // Step 2: Generate query embedding
+        let query_embedding = self.nlp_engine.generate_embedding(query).await?;
+
+        // Step 3: Coordinate multiple search strategies
+        let search_results = self
+            .multi_strategy_search(query_embedding, &entities, &temporal_refs, &visual_refs)
+            .await?;
+
+        // Step 4: Intelligent fusion and ranking
+        self.intelligent_result_fusion(search_results, query).await
+    }
+
+    async fn extract_entities(&self, query: &str) -> NodeSpaceResult<ExtractedEntities> {
+        // Use LLM for entity extraction with structured prompt
+        let extraction_prompt = format!(
+            "Extract entities from this query and respond in JSON format:
+Query: '{}'
+
+Extract:
+- people: names of people mentioned
+- events: events or occasions mentioned  
+- objects: physical objects or items mentioned
+- locations: places or locations mentioned
+
+Respond with JSON: {{\"people\": [...], \"events\": [...], \"objects\": [...], \"locations\": [...]}}",
+            query
+        );
+
+        match self.nlp_engine.generate_text(&extraction_prompt).await {
+            Ok(response) => {
+                // Parse JSON response
+                match serde_json::from_str::<ExtractedEntities>(&response) {
+                    Ok(entities) => Ok(entities),
+                    Err(_) => {
+                        // Fallback: simple pattern matching if JSON parsing fails
+                        Ok(self.extract_entities_fallback(query))
+                    }
+                }
+            }
+            Err(_) => {
+                // Fallback to pattern matching if LLM fails
+                Ok(self.extract_entities_fallback(query))
+            }
+        }
+    }
+
+    async fn extract_temporal_refs(&self, query: &str) -> NodeSpaceResult<Vec<TemporalReference>> {
+        let temporal_prompt = format!(
+            "Extract temporal references from this query. Look for dates, times, or event-based temporal references:
+Query: '{}'
+
+Find references like:
+- Specific dates (June 15, 2023-06-15)
+- Relative times (yesterday, last week)  
+- Event-based times (during birthday, at the meeting)
+- Fuzzy times (around that time, recently)
+
+For each reference, determine if it's exact, relative, event-based, or fuzzy.",
+            query
+        );
+
+        match self.nlp_engine.generate_text(&temporal_prompt).await {
+            Ok(_response) => {
+                // For MVP, do simple pattern matching
+                Ok(self.extract_temporal_refs_fallback(query))
+            }
+            Err(_) => {
+                // Fallback to pattern matching
+                Ok(self.extract_temporal_refs_fallback(query))
+            }
+        }
+    }
+
+    async fn extract_visual_refs(&self, query: &str) -> NodeSpaceResult<VisualAttributes> {
+        // Look for visual attributes in the query
+        let colors = self.extract_colors(query);
+        let objects = self.extract_visual_objects(query);
+        let scene_types = self.extract_scene_types(query);
+        let people_descriptions = self.extract_people_descriptions(query);
+
+        Ok(VisualAttributes {
+            colors,
+            objects,
+            scene_types,
+            people_descriptions,
+        })
+    }
+
+    async fn multi_strategy_search(
+        &self,
+        query_embedding: Vec<f32>,
+        entities: &ExtractedEntities,
+        temporal_refs: &[TemporalReference],
+        visual_refs: &VisualAttributes,
+    ) -> NodeSpaceResult<Vec<SearchResult>> {
+        let mut all_results = Vec::new();
+
+        // Strategy 1: Semantic search
+        match self
+            .data_store
+            .semantic_search_with_embedding(query_embedding.clone(), 20)
+            .await
+        {
+            Ok(semantic_results) => {
+                for (node, score) in semantic_results {
+                    all_results.push(SearchResult {
+                        node_id: node.id.clone(),
+                        node,
+                        score,
+                    });
+                }
+            }
+            Err(_) => {
+                // Continue with other strategies if semantic search fails
+            }
+        }
+
+        // Strategy 2: Entity-based search
+        for person in &entities.people {
+            if let Ok(entity_results) = self.search_by_entity(person).await {
+                all_results.extend(entity_results);
+            }
+        }
+
+        // Strategy 3: Temporal search
+        for temporal_ref in temporal_refs {
+            if let Ok(temporal_results) = self.search_by_temporal_ref(temporal_ref).await {
+                all_results.extend(temporal_results);
+            }
+        }
+
+        // Strategy 4: Visual search (if visual attributes found)
+        if !visual_refs.colors.is_empty() || !visual_refs.objects.is_empty() {
+            if let Ok(visual_results) = self.search_by_visual_attributes(visual_refs).await {
+                all_results.extend(visual_results);
+            }
+        }
+
+        Ok(all_results)
+    }
+
+    async fn intelligent_result_fusion(
+        &self,
+        mut search_results: Vec<SearchResult>,
+        _original_query: &str,
+    ) -> NodeSpaceResult<Vec<SearchResult>> {
+        // Remove duplicates based on node ID (using string representation)
+        search_results.sort_by(|a, b| a.node_id.to_string().cmp(&b.node_id.to_string()));
+        search_results.dedup_by(|a, b| a.node_id == b.node_id);
+
+        // Sort by score (highest first)
+        search_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Limit results
+        search_results.truncate(10);
+
+        Ok(search_results)
+    }
+}
+
+impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D, N> {
+    /// Fallback entity extraction using pattern matching
+    fn extract_entities_fallback(&self, query: &str) -> ExtractedEntities {
+        let query_lower = query.to_lowercase();
+        let mut people = Vec::new();
+        let mut events = Vec::new();
+        let mut objects = Vec::new();
+        let locations = Vec::new();
+
+        // Common name patterns (basic detection)
+        let name_patterns = ["claire", "john", "mary", "david", "sarah", "mike", "anna"];
+        for pattern in &name_patterns {
+            if query_lower.contains(pattern) {
+                people.push(pattern.to_string());
+            }
+        }
+
+        // Event patterns
+        let event_patterns = [
+            "birthday",
+            "meeting",
+            "party",
+            "conference",
+            "dinner",
+            "lunch",
+        ];
+        for pattern in &event_patterns {
+            if query_lower.contains(pattern) {
+                events.push(pattern.to_string());
+            }
+        }
+
+        // Object patterns
+        let object_patterns = [
+            "shirt",
+            "document",
+            "photo",
+            "screenshot",
+            "diagram",
+            "chart",
+        ];
+        for pattern in &object_patterns {
+            if query_lower.contains(pattern) {
+                objects.push(pattern.to_string());
+            }
+        }
+
+        ExtractedEntities {
+            people,
+            events,
+            objects,
+            locations,
+        }
+    }
+
+    /// Fallback temporal reference extraction
+    fn extract_temporal_refs_fallback(&self, query: &str) -> Vec<TemporalReference> {
+        let query_lower = query.to_lowercase();
+        let mut refs = Vec::new();
+
+        // Look for relative time patterns
+        if query_lower.contains("yesterday") {
+            refs.push(TemporalReference {
+                raw_text: "yesterday".to_string(),
+                parsed_date: Some(chrono::Utc::now().date_naive() - chrono::Duration::days(1)),
+                date_range: None,
+                temporal_type: TemporalType::Relative,
+            });
+        }
+
+        if query_lower.contains("birthday") {
+            refs.push(TemporalReference {
+                raw_text: "birthday".to_string(),
+                parsed_date: None,
+                date_range: None,
+                temporal_type: TemporalType::Event,
+            });
+        }
+
+        if query_lower.contains("last week") {
+            let start_date = chrono::Utc::now().date_naive() - chrono::Duration::days(7);
+            let end_date = chrono::Utc::now().date_naive();
+            refs.push(TemporalReference {
+                raw_text: "last week".to_string(),
+                parsed_date: None,
+                date_range: Some((start_date, end_date)),
+                temporal_type: TemporalType::Relative,
+            });
+        }
+
+        refs
+    }
+
+    /// Extract color references from query
+    fn extract_colors(&self, query: &str) -> Vec<String> {
+        let query_lower = query.to_lowercase();
+        let colors = [
+            "red", "blue", "green", "yellow", "black", "white", "purple", "orange", "pink", "brown",
+        ];
+
+        colors
+            .iter()
+            .filter(|&color| query_lower.contains(color))
+            .map(|&color| color.to_string())
+            .collect()
+    }
+
+    /// Extract visual object references
+    fn extract_visual_objects(&self, query: &str) -> Vec<String> {
+        let query_lower = query.to_lowercase();
+        let objects = [
+            "shirt", "dress", "hat", "car", "building", "tree", "person", "face",
+        ];
+
+        objects
+            .iter()
+            .filter(|&obj| query_lower.contains(obj))
+            .map(|&obj| obj.to_string())
+            .collect()
+    }
+
+    /// Extract scene type references
+    fn extract_scene_types(&self, query: &str) -> Vec<String> {
+        let query_lower = query.to_lowercase();
+        let scenes = [
+            "indoor",
+            "outdoor",
+            "office",
+            "restaurant",
+            "home",
+            "park",
+            "street",
+        ];
+
+        scenes
+            .iter()
+            .filter(|&scene| query_lower.contains(scene))
+            .map(|&scene| scene.to_string())
+            .collect()
+    }
+
+    /// Extract people descriptions
+    fn extract_people_descriptions(&self, query: &str) -> Vec<String> {
+        let query_lower = query.to_lowercase();
+        let mut descriptions = Vec::new();
+
+        if query_lower.contains("wearing") {
+            descriptions.push("wearing clothing".to_string());
+        }
+        if query_lower.contains("smiling") {
+            descriptions.push("smiling".to_string());
+        }
+
+        descriptions
+    }
+
+    /// Search nodes by entity mentions
+    async fn search_by_entity(&self, entity: &str) -> NodeSpaceResult<Vec<SearchResult>> {
+        let query = format!(
+            "SELECT * FROM nodes WHERE content CONTAINS '{}' LIMIT 10",
+            entity
+        );
+
+        let nodes = self.data_store.query_nodes(&query).await?;
+        let results = nodes
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| {
+                SearchResult {
+                    node_id: node.id.clone(),
+                    node,
+                    score: 0.8 - (index as f32 * 0.05), // Decreasing score by position
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Search nodes by temporal reference
+    async fn search_by_temporal_ref(
+        &self,
+        temporal_ref: &TemporalReference,
+    ) -> NodeSpaceResult<Vec<SearchResult>> {
+        match &temporal_ref.temporal_type {
+            TemporalType::Event => {
+                // Search for event mentions
+                self.search_by_entity(&temporal_ref.raw_text).await
+            }
+            TemporalType::Exact | TemporalType::Relative => {
+                if let Some(date) = temporal_ref.parsed_date {
+                    let date_str = date.format("%Y-%m-%d").to_string();
+                    let query = format!(
+                        "SELECT * FROM nodes WHERE created_at LIKE '{}%' LIMIT 10",
+                        date_str
+                    );
+
+                    let nodes = self.data_store.query_nodes(&query).await?;
+                    let results = nodes
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, node)| SearchResult {
+                            node_id: node.id.clone(),
+                            node,
+                            score: 0.9 - (index as f32 * 0.05),
+                        })
+                        .collect();
+
+                    Ok(results)
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            TemporalType::Fuzzy => {
+                // For fuzzy temporal references, return empty for now
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Search nodes by visual attributes
+    async fn search_by_visual_attributes(
+        &self,
+        visual_refs: &VisualAttributes,
+    ) -> NodeSpaceResult<Vec<SearchResult>> {
+        let mut results = Vec::new();
+
+        // Search for color mentions
+        for color in &visual_refs.colors {
+            if let Ok(color_results) = self.search_by_entity(color).await {
+                results.extend(color_results);
+            }
+        }
+
+        // Search for object mentions
+        for object in &visual_refs.objects {
+            if let Ok(object_results) = self.search_by_entity(object).await {
+                results.extend(object_results);
+            }
+        }
+
+        Ok(results)
     }
 }

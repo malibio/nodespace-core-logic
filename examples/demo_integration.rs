@@ -1,5 +1,5 @@
 use nodespace_core_logic::{CoreLogic, LegacyCoreLogic, NodeSpaceService};
-use nodespace_data_store::SurrealDataStore;
+use nodespace_data_store::LanceDataStore;
 use nodespace_nlp_engine::LocalNLPEngine;
 use serde_json::json;
 
@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("NodeSpace Core Logic - NS-13 Business Logic & Integration Demo");
 
     // Initialize services using distributed contracts
-    let data_store = SurrealDataStore::new("memory").await?;
+    let data_store = LanceDataStore::new("memory").await?;
     let nlp_engine = LocalNLPEngine::new();
 
     // Create the core service that orchestrates everything

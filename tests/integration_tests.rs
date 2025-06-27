@@ -102,6 +102,37 @@ impl DataStore for MockDataStore {
         // For mock, delegate to search_similar_nodes
         self.search_similar_nodes(embedding, limit).await
     }
+
+    // Cross-modal search methods (NS-81 support)
+    async fn create_image_node(&self, _image_node: nodespace_data_store::ImageNode) -> NodeSpaceResult<String> {
+        Ok("mock-image-node-id".to_string())
+    }
+
+    async fn get_image_node(&self, _id: &str) -> NodeSpaceResult<Option<nodespace_data_store::ImageNode>> {
+        Ok(None) // Mock returns no image node
+    }
+
+    async fn search_multimodal(&self, _query_embedding: Vec<f32>, _types: Vec<nodespace_data_store::NodeType>) -> NodeSpaceResult<Vec<Node>> {
+        let nodes = self.nodes.read().await;
+        Ok(nodes.clone())
+    }
+
+    async fn hybrid_multimodal_search(&self, _query_embedding: Vec<f32>, _config: &nodespace_data_store::HybridSearchConfig) -> NodeSpaceResult<Vec<nodespace_data_store::SearchResult>> {
+        let nodes = self.nodes.read().await;
+        let results = nodes.iter().enumerate().map(|(index, node)| {
+            nodespace_data_store::SearchResult {
+                node: node.clone(),
+                score: 0.9 - (index as f32 * 0.1),
+                relevance_factors: nodespace_data_store::RelevanceFactors {
+                    semantic_score: 0.8,
+                    structural_score: 0.7,
+                    temporal_score: 0.6,
+                    cross_modal_score: Some(0.5),
+                },
+            }
+        }).collect();
+        Ok(results)
+    }
 }
 
 /// Mock NLP Engine for testing
@@ -150,7 +181,7 @@ impl NLPEngine for MockNLPEngine {
             "Generated response for: {}",
             request.prompt.chars().take(50).collect::<String>()
         );
-        
+
         Ok(nodespace_nlp_engine::EnhancedTextGenerationResponse {
             text: answer,
             tokens_used: 50,
