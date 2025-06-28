@@ -680,6 +680,141 @@ async fn on_node_updated(&self, node_id: &NodeId) {
 }
 ```
 
+## LanceDB Concurrency and Multi-Process Access
+
+### Concurrency Model
+
+**LanceDB supports concurrent access with important limitations:**
+
+**✅ Multiple Readers (Safe):**
+```rust
+// Process 1: Reading nodes
+let nodes1 = service1.semantic_search("product launch").await?;
+
+// Process 2: Reading nodes (SIMULTANEOUSLY)
+let nodes2 = service2.get_nodes_for_date(date).await?;
+
+// ✅ Both work fine - no conflicts
+```
+
+**✅ Single Writer + Multiple Readers (Safe):**
+```rust
+// Process 1: Writing new node
+service1.create_knowledge_node("New content", metadata).await?;
+
+// Process 2: Reading (SIMULTANEOUSLY) 
+let results = service2.query_nodes("search").await?;
+
+// ✅ Reads see consistent snapshot, writes append new data
+```
+
+**❌ Concurrent Writes (Problematic):**
+```rust
+// Process 1: Updating node
+service1.update_node(&node_id, "New content 1").await?;
+
+// Process 2: Updating same/different node (SIMULTANEOUSLY)
+service2.update_node(&node_id2, "New content 2").await?;
+
+// ❌ Risk of file corruption or lost writes
+```
+
+### NodeSpace Desktop App Patterns
+
+**✅ Recommended: Single Service Instance (Shared)**
+```rust
+// Share NodeSpaceService across all app windows
+#[derive(Clone)]
+pub struct AppState {
+    pub nodespace: Arc<NodeSpaceService>,
+}
+
+let shared_state = AppState {
+    nodespace: Arc::new(NodeSpaceService::create_with_paths(db_path, models).await?),
+};
+
+// All operations use same service instance
+shared_state.nodespace.create_knowledge_node(...).await?;
+shared_state.nodespace.update_node(...).await?;
+```
+
+**✅ Safe: Single Writer + Read-Only Services**
+```rust
+pub struct NodeSpaceManager {
+    writer_service: NodeSpaceService,
+    reader_services: Vec<NodeSpaceService>,
+}
+
+impl NodeSpaceManager {
+    // All writes go through single service
+    pub async fn write_operation(&self, ...) -> Result<(), Error> {
+        self.writer_service.create_knowledge_node(...).await
+    }
+    
+    // Reads can use dedicated services
+    pub async fn read_operation(&self, reader_index: usize, ...) -> Result<Vec<Node>, Error> {
+        self.reader_services[reader_index].semantic_search(...).await
+    }
+}
+```
+
+**❌ Avoid: Multiple Desktop App Instances**
+```rust
+// Don't do this - risk of concurrent writes
+let app1 = NodeSpaceService::create_with_paths(db_path, models).await?; // Window 1
+let app2 = NodeSpaceService::create_with_paths(db_path, models).await?; // Window 2
+
+// Instead: Share single instance between windows
+```
+
+### Background Services Pattern
+
+**✅ Safe for Read-Heavy Workloads:**
+```rust
+// Main app (writes)
+let main_app = NodeSpaceService::create_with_paths(db_path, models).await?;
+
+// Background services (read-only)
+let indexing_service = NodeSpaceService::create_with_paths(db_path, models).await?;
+let export_service = NodeSpaceService::create_with_paths(db_path, models).await?;
+
+// Writes go through main app only
+main_app.create_knowledge_node(...).await?;
+
+// Concurrent reads are safe
+tokio::join!(
+    indexing_service.semantic_search("index this"),
+    export_service.get_all_nodes(),
+);
+```
+
+### Alternative: Database Per Process
+
+**For scenarios requiring multiple writers:**
+```rust
+// Process 1: Main user database
+let main_db = NodeSpaceService::create_with_paths(
+    "/Users/malibio/nodespace/data/main.db", models
+).await?;
+
+// Process 2: Separate background processing database  
+let background_db = NodeSpaceService::create_with_paths(
+    "/Users/malibio/nodespace/data/background.db", models
+).await?;
+
+// Sync between databases periodically if needed
+```
+
+### Concurrency Best Practices
+
+1. **Single Writer Pattern**: Use one service instance for all writes
+2. **Service Sharing**: Share NodeSpaceService instance across app components
+3. **Read-Only Services**: Background services should only read, never write
+4. **Database Isolation**: Use separate databases if multiple processes need to write
+5. **Local-First Advantage**: Single-user desktop app naturally avoids many concurrency issues
+
+**For NodeSpace's desktop app architecture, the single shared service instance pattern is ideal** since one user primarily interacts with their personal knowledge base through a single application interface.
+
 ## Implementation Guidelines
 
 ### 1. Data Store Integration
