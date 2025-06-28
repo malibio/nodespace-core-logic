@@ -15,5 +15,11 @@ serde_json = "1.0"
 thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Features temporarily disabled until dependency issues are resolved
+# [features]
+# default = ["data-store", "nlp-engine"]
+# data-store = ["dep:nodespace-data-store"]
+# nlp-engine = ["dep:nodespace-nlp-engine"]
+
 [dev-dependencies]
 

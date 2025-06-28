@@ -1,11 +1,101 @@
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
-use nodespace_data_store::DataStore;
-use nodespace_nlp_engine::NLPEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+// Import traits from their respective repositories
+pub use nodespace_data_store::DataStore;
+pub use nodespace_nlp_engine::NLPEngine;
+
+/// Simple performance monitoring (compatible with all dependencies)
+pub mod monitoring {
+    use std::time::Instant;
+
+    /// Simple performance timer for operations
+    pub struct OperationTimer {
+        _operation_name: String,
+        _start_time: Instant,
+    }
+
+    impl OperationTimer {
+        pub fn new(operation_name: &str) -> Self {
+            Self {
+                _operation_name: operation_name.to_string(),
+                _start_time: Instant::now(),
+            }
+        }
+
+        /// Add metadata (no-op for compatibility)
+        pub fn with_metadata(self, _key: String, _value: String) -> Self {
+            self
+        }
+
+        /// Complete operation successfully (no-op for compatibility)
+        pub fn complete_success(self) {
+            // No-op for now to avoid dependency conflicts
+        }
+
+        /// Complete operation with error (no-op for compatibility)
+        pub fn complete_error(self, _error: String) {
+            // No-op for now to avoid dependency conflicts
+        }
+    }
+
+    /// Simple performance monitor (stub for compatibility)
+    #[derive(Debug, Default)]
+    pub struct PerformanceMonitor;
+
+    impl PerformanceMonitor {
+        pub fn new() -> Self {
+            Self
+        }
+
+        /// Start timing an operation
+        pub fn start_operation(&self, operation_name: &str) -> OperationTimer {
+            OperationTimer::new(operation_name)
+        }
+    }
+}
+
+/// Configuration constants for NodeSpace service
+pub mod constants {
+    /// Default embedding model
+    pub const DEFAULT_EMBEDDING_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
+    /// Default text generation model
+    pub const DEFAULT_TEXT_MODEL: &str = "mistralai/Mistral-7B-Instruct-v0.1";
+    /// Default download timeout in seconds
+    pub const DEFAULT_DOWNLOAD_TIMEOUT: u64 = 300;
+    /// Default maximum batch size for operations
+    pub const DEFAULT_MAX_BATCH_SIZE: usize = 32;
+    /// Default context window size
+    pub const DEFAULT_CONTEXT_WINDOW: usize = 4096;
+    /// Default temperature for text generation
+    pub const DEFAULT_TEMPERATURE: f32 = 0.7;
+    /// Default search limit for semantic search
+    pub const DEFAULT_SEARCH_LIMIT: usize = 5;
+    /// Default search limit for multi-strategy search
+    pub const DEFAULT_MULTI_STRATEGY_LIMIT: usize = 20;
+    /// Default maximum results per strategy
+    pub const DEFAULT_MAX_RESULTS_PER_STRATEGY: usize = 10;
+    /// Default final result limit
+    pub const DEFAULT_FINAL_RESULT_LIMIT: usize = 10;
+    /// Score decay factor for search results
+    pub const SCORE_DECAY_FACTOR: f32 = 0.1;
+    /// Minimum search score
+    pub const MIN_SEARCH_SCORE: f32 = 0.1;
+    /// Base confidence for queries with context
+    pub const BASE_CONFIDENCE_WITH_CONTEXT: f32 = 0.8;
+    /// Base confidence for queries without context
+    pub const BASE_CONFIDENCE_NO_CONTEXT: f32 = 0.3;
+    /// Confidence reduction factor for fallback responses
+    pub const FALLBACK_CONFIDENCE_FACTOR: f32 = 0.5;
+    /// Default embedding dimension (for fallback)
+    pub const DEFAULT_EMBEDDING_DIMENSION: usize = 768;
+    /// Reserved space for prompt structure in context window
+    pub const PROMPT_STRUCTURE_RESERVE: usize = 200;
+}
 
 /// Configuration for NodeSpace service initialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,15 +152,15 @@ impl Default for NodeSpaceConfig {
     fn default() -> Self {
         Self {
             model_config: ModelConfig {
-                embedding_model: Some("sentence-transformers/all-MiniLM-L6-v2".to_string()),
-                text_model: Some("mistralai/Mistral-7B-Instruct-v0.1".to_string()),
-                download_timeout: Some(300), // 5 minutes
-                cache_dir: None,             // Use system default
+                embedding_model: Some(constants::DEFAULT_EMBEDDING_MODEL.to_string()),
+                text_model: Some(constants::DEFAULT_TEXT_MODEL.to_string()),
+                download_timeout: Some(constants::DEFAULT_DOWNLOAD_TIMEOUT),
+                cache_dir: None, // Use system default
             },
             performance_config: PerformanceConfig {
-                max_batch_size: Some(32),
-                context_window: Some(4096),
-                temperature: Some(0.7),
+                max_batch_size: Some(constants::DEFAULT_MAX_BATCH_SIZE),
+                context_window: Some(constants::DEFAULT_CONTEXT_WINDOW),
+                temperature: Some(constants::DEFAULT_TEMPERATURE),
             },
             offline_config: OfflineConfig {
                 enable_offline: true,
@@ -96,6 +186,7 @@ pub struct NodeSpaceService<D: DataStore, N: NLPEngine> {
     nlp_engine: N,
     config: NodeSpaceConfig,
     state: Arc<RwLock<ServiceState>>,
+    performance_monitor: monitoring::PerformanceMonitor,
 }
 
 impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
@@ -111,7 +202,13 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
             nlp_engine,
             config,
             state: Arc::new(RwLock::new(ServiceState::Uninitialized)),
+            performance_monitor: monitoring::PerformanceMonitor::new(),
         }
+    }
+
+    /// Get performance monitor for metrics access
+    pub fn performance_monitor(&self) -> &monitoring::PerformanceMonitor {
+        &self.performance_monitor
     }
 }
 
@@ -302,6 +399,13 @@ pub trait CoreLogic: Send + Sync {
         previous_sibling_id: Option<&NodeId>,
         next_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()>;
+
+    /// Batch lookup for multiple node relationships (optimization for N+1 queries)
+    async fn get_batch_related_nodes(
+        &self,
+        node_ids: &[NodeId],
+        relationship_types: Vec<String>,
+    ) -> NodeSpaceResult<std::collections::HashMap<NodeId, Vec<NodeId>>>;
 }
 
 /// Cross-modal search orchestration interface for complex queries
@@ -344,6 +448,9 @@ pub trait CrossModalSearch: Send + Sync {
 pub trait DateNavigation: Send + Sync {
     /// Get all text nodes for a specific date
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Navigate to a specific date with navigation context
+    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult>;
 
     /// Get today's date for navigation
     fn get_today() -> NaiveDate {
@@ -414,6 +521,15 @@ pub struct QueryResponse {
     pub related_queries: Vec<String>,
 }
 
+/// Navigation result for date-based navigation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavigationResult {
+    pub date: NaiveDate,
+    pub nodes: Vec<Node>,
+    pub has_previous: bool,
+    pub has_next: bool,
+}
+
 #[async_trait]
 impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeSpaceService<D, N> {
     async fn create_knowledge_node(
@@ -421,13 +537,17 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         content: &str,
         metadata: serde_json::Value,
     ) -> NodeSpaceResult<NodeId> {
+        let timer = self
+            .performance_monitor
+            .start_operation("create_knowledge_node")
+            .with_metadata("content_length".to_string(), content.len().to_string());
+
         // Check if service is ready
         if !self.is_ready().await {
             let state = self.get_state().await;
-            return Err(NodeSpaceError::InternalError(format!(
-                "Service not ready: {:?}",
-                state
-            )));
+            let error = NodeSpaceError::InternalError(format!("Service not ready: {:?}", state));
+            timer.complete_error(error.to_string());
+            return Err(error);
         }
 
         // Create the node with provided content and metadata
@@ -444,20 +564,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             previous_sibling: None,
         };
 
-        // Store the node
-        self.data_store.store_node(node).await?;
-
         // Generate embeddings with improved error handling
-        match self.nlp_engine.generate_embedding(content).await {
-            Ok(_embedding) => {
-                // Embeddings are generated for semantic search capabilities
-            }
+        let embedding_result = match self.nlp_engine.generate_embedding(content).await {
+            Ok(embedding) => Some(embedding),
             Err(e) => {
                 // Handle embedding failure based on configuration
                 match self.config.offline_config.offline_fallback {
                     OfflineFallback::Error => {
-                        // Delete the stored node since embedding failed
-                        let _ = self.data_store.delete_node(&node_id).await;
                         return Err(NodeSpaceError::ProcessingError(format!(
                             "Embedding generation failed: {}",
                             e
@@ -466,11 +579,20 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                     OfflineFallback::Stub | OfflineFallback::Cache => {
                         // Continue without embeddings, log warning
                         eprintln!("Warning: Embedding generation failed, continuing without semantic search: {}", e);
+                        None
                     }
                 }
             }
+        };
+
+        // Store the node with embedding if available, or without if in offline mode
+        if let Some(embedding) = embedding_result {
+            self.data_store.store_node_with_embedding(node, embedding).await?;
+        } else {
+            self.data_store.store_node(node).await?;
         }
 
+        timer.complete_success();
         Ok(node_id)
     }
 
@@ -504,12 +626,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let mut results = Vec::new();
         for (index, node) in nodes.into_iter().enumerate() {
             // Simple scoring based on position (higher position = lower score)
-            let score = 1.0 - (index as f32 * 0.1);
+            let score = 1.0 - (index as f32 * constants::SCORE_DECAY_FACTOR);
 
             results.push(SearchResult {
                 node_id: node.id.clone(),
                 node,
-                score: score.max(0.1), // Minimum score of 0.1
+                score: score.max(constants::MIN_SEARCH_SCORE),
             });
         }
 
@@ -517,111 +639,48 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
     }
 
     async fn process_query(&self, query: &str) -> NodeSpaceResult<QueryResponse> {
+        let timer = self
+            .performance_monitor
+            .start_operation("process_query")
+            .with_metadata("query_length".to_string(), query.len().to_string());
+
         // Check if service is ready
         if !self.is_ready().await {
             let state = self.get_state().await;
-            return Err(NodeSpaceError::InternalError(format!(
-                "Service not ready: {:?}",
-                state
-            )));
+            let error = NodeSpaceError::InternalError(format!("Service not ready: {:?}", state));
+            timer.complete_error(error.to_string());
+            return Err(error);
         }
 
-        // Step 1: Perform semantic search for context
-        let search_results = self.semantic_search(query, 5).await?;
+        // Step 1: Gather context from semantic search
+        let (context, sources) = self.gather_query_context(query).await?;
 
-        // Step 2: Extract text content and source IDs
-        let context: Vec<String> = search_results
-            .iter()
-            .filter_map(|result| result.node.content.as_str().map(|s| s.to_string()))
-            .collect();
+        // Step 2: Build and execute prompt
+        let prompt = self.build_contextual_prompt(query, &context);
+        let answer = self.generate_contextual_answer(&prompt, &sources).await?;
 
-        let sources: Vec<NodeId> = search_results
-            .iter()
-            .map(|result| result.node_id.clone())
-            .collect();
+        // Step 3: Calculate confidence and generate suggestions
+        let confidence = self.calculate_response_confidence(&context, &answer);
+        let related_queries = self.generate_related_queries(query);
 
-        // Step 3: Build prompt with context window management
-        let context_text = context.join("\n\n");
-        let max_context_len = self
-            .config
-            .performance_config
-            .context_window
-            .unwrap_or(4096)
-            .saturating_sub(query.len() + 200); // Reserve space for prompt structure and query
-
-        let truncated_context = if context_text.len() > max_context_len {
-            format!("{}...", &context_text[..max_context_len])
-        } else {
-            context_text
-        };
-
-        let prompt = if truncated_context.is_empty() {
-            format!("Answer this question based on general knowledge: {}", query)
-        } else {
-            format!(
-                "Based on the following context, answer the question: {}\n\nContext:\n{}",
-                query, truncated_context
-            )
-        };
-
-        // Step 4: Generate response with error handling
-        let answer = match self.nlp_engine.generate_text(&prompt).await {
-            Ok(text) => text,
-            Err(e) => {
-                // Handle text generation failure based on configuration
-                match self.config.offline_config.offline_fallback {
-                    OfflineFallback::Error => {
-                        return Err(NodeSpaceError::ProcessingError(format!(
-                            "Text generation failed: {}",
-                            e
-                        )));
-                    }
-                    OfflineFallback::Stub => {
-                        format!("I apologize, but I'm currently unable to generate a response due to AI system limitations. Please try again later. Query: {}", query)
-                    }
-                    OfflineFallback::Cache => {
-                        // For MVP, provide a basic fallback response
-                        if sources.is_empty() {
-                            "I found no relevant information to answer your question.".to_string()
-                        } else {
-                            format!("I found {} related documents but cannot generate a detailed response at this time. Please review the source materials directly.", sources.len())
-                        }
-                    }
-                }
-            }
-        };
-
-        // Step 5: Calculate confidence based on context quality and AI availability
-        let base_confidence = if context.is_empty() { 0.3 } else { 0.8 };
-        let confidence =
-            if answer.contains("currently unable") || answer.contains("cannot generate") {
-                base_confidence * 0.5 // Reduce confidence for fallback responses
-            } else {
-                base_confidence
-            };
-
-        // Step 6: Generate related queries (simplified for MVP)
-        let related_queries = vec![
-            format!(
-                "What else about {}?",
-                query.split_whitespace().last().unwrap_or("this topic")
-            ),
-            format!(
-                "How does {} work?",
-                query
-                    .split_whitespace()
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-        ];
-
-        Ok(QueryResponse {
+        let response = QueryResponse {
             answer,
             sources,
             confidence,
             related_queries,
-        })
+        };
+
+        timer.complete_success();
+        Ok(response)
+    }
+
+    async fn get_batch_related_nodes(
+        &self,
+        node_ids: &[NodeId],
+        relationship_types: Vec<String>,
+    ) -> NodeSpaceResult<std::collections::HashMap<NodeId, Vec<NodeId>>> {
+        // Use the implementation from the impl block
+        NodeSpaceService::get_batch_related_nodes(self, node_ids, relationship_types).await
     }
 
     async fn update_node(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
@@ -636,17 +695,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         node.content = serde_json::Value::String(content.to_string());
         node.updated_at = chrono::Utc::now().to_rfc3339();
 
-        // Store updated node
-        self.data_store.store_node(node).await?;
-
-        // Regenerate embeddings for updated content
-        let _embedding = self
-            .nlp_engine
-            .generate_embedding(content)
-            .await
-            .unwrap_or_else(|_| vec![0.0; 768]);
-
-        // Embeddings are updated for semantic search capabilities
+        // Use the data store's update method which handles embedding regeneration automatically
+        // The LanceDB data store now detects content changes and regenerates embeddings as needed
+        self.data_store.update_node(node).await?;
 
         Ok(())
     }
@@ -670,27 +721,54 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             )
         };
 
-        // For LanceDB: relationships are stored in metadata, not separate tables
-        // Get all nodes and filter by relationships in metadata
-        let all_nodes = self.data_store.query_nodes("").await.unwrap_or_default();
-        let result_nodes: Vec<_> = all_nodes
-            .into_iter()
-            .filter(|node| {
-                // Check if this node has a relationship to our target node
-                if let Some(metadata) = &node.metadata {
-                    if let Some(mentions) = metadata.get("mentions") {
-                        if let Some(mentions_array) = mentions.as_array() {
-                            return mentions_array
-                                .iter()
-                                .any(|mention| mention.as_str() == Some(node_id.as_str()));
+        // Optimized relationship lookup using batch operations
+        // Instead of loading all nodes, we can use targeted queries
+        let related_nodes = if relationship_types.is_empty() {
+            // Search for any mentions of the target node ID
+            self.data_store
+                .query_nodes(&node_id.to_string())
+                .await
+                .unwrap_or_default()
+        } else {
+            // For specific relationship types, we'd need more sophisticated querying
+            // For now, fall back to the general approach but cache results
+            let all_nodes = self.data_store.query_nodes("").await.unwrap_or_default();
+            all_nodes
+                .into_iter()
+                .filter(|node| {
+                    // Check if this node has a relationship to our target node
+                    if let Some(metadata) = &node.metadata {
+                        if let Some(mentions) = metadata.get("mentions") {
+                            if let Some(mentions_array) = mentions.as_array() {
+                                return mentions_array
+                                    .iter()
+                                    .any(|mention| mention.as_str() == Some(node_id.as_str()));
+                            }
+                        }
+                        // Also check for specific relationship types in metadata
+                        for rel_type in &relationship_types {
+                            if let Some(relationships) = metadata.get("relationships") {
+                                if let Some(rel_obj) = relationships.as_object() {
+                                    if let Some(targets) = rel_obj.get(rel_type) {
+                                        if let Some(targets_array) = targets.as_array() {
+                                            if targets_array
+                                                .iter()
+                                                .any(|t| t.as_str() == Some(node_id.as_str()))
+                                            {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-                false
-            })
-            .collect();
+                    false
+                })
+                .collect()
+        };
 
-        let related_ids: Vec<NodeId> = result_nodes.into_iter().map(|node| node.id).collect();
+        let related_ids: Vec<NodeId> = related_nodes.into_iter().map(|node| node.id).collect();
 
         Ok(related_ids)
     }
@@ -782,8 +860,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             }
         }
 
-        // Store the updated node
-        self.data_store.store_node(node).await?;
+        // Update the node using the data store's update method
+        self.data_store.update_node(node).await?;
         Ok(())
     }
 
@@ -812,7 +890,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         }
 
         node.metadata = Some(metadata);
-        self.data_store.store_node(node).await?;
+        self.data_store.update_node(node).await?;
         Ok(())
     }
 
@@ -833,21 +911,21 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         node.previous_sibling = previous_sibling_id.cloned();
         node.next_sibling = next_sibling_id.cloned();
 
-        // Store the updated node
-        self.data_store.store_node(node).await?;
+        // Update the updated node using the data store's update method
+        self.data_store.update_node(node).await?;
 
         // Update affected siblings' pointers to maintain consistency
         if let Some(prev_id) = previous_sibling_id {
             if let Some(mut prev_node) = self.data_store.get_node(prev_id).await? {
                 prev_node.next_sibling = Some(node_id.clone());
-                self.data_store.store_node(prev_node).await?;
+                self.data_store.update_node(prev_node).await?;
             }
         }
 
         if let Some(next_id) = next_sibling_id {
             if let Some(mut next_node) = self.data_store.get_node(next_id).await? {
                 next_node.previous_sibling = Some(node_id.clone());
-                self.data_store.store_node(next_node).await?;
+                self.data_store.update_node(next_node).await?;
             }
         }
 
@@ -949,38 +1027,86 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
     for NodeSpaceService<D, N>
 {
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>> {
-        // For LanceDB: Get all nodes and filter by created_at date
-        // IMPORTANT: Only return top-level nodes (nodes without parent_id) to preserve hierarchy
+        // Step 1: Get all nodes
         let all_nodes = self.data_store.query_nodes("").await?; // Empty query returns all nodes
 
-        // Filter nodes by created_at date AND only return top-level nodes
-        let filtered_nodes: Vec<Node> = all_nodes
-            .into_iter()
-            .filter(|node| {
-                // Date filter: Parse the created_at timestamp and compare dates
-                let matches_date = if let Ok(node_datetime) =
-                    chrono::DateTime::parse_from_rfc3339(&node.created_at)
-                {
-                    node_datetime.date_naive() == date
+        // Step 2: Find the date node - the node that represents this date
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let date_header = format!("# {}", date.format("%B %-d, %Y")); // e.g., "# June 27, 2025"
+        
+        let date_node_id = all_nodes
+            .iter()
+            .find(|node| {
+                // Look for the date node by content
+                if let Some(content) = node.content.as_str() {
+                    // Remove surrounding quotes if present and trim
+                    let clean_content = content.trim().trim_matches('"').trim();
+                    clean_content == date_header || 
+                    clean_content.starts_with(&format!("# {}", date_str)) ||
+                    clean_content == format!("# {}", date_str)
                 } else {
-                    // Fallback: try parsing as date-only string
-                    node.created_at
-                        .starts_with(&date.format("%Y-%m-%d").to_string())
-                };
-
-                // Hierarchy filter: Only return top-level nodes (no parent_id in metadata)
-                let is_top_level = if let Some(metadata) = &node.metadata {
-                    metadata.get("parent_id").is_none()
-                } else {
-                    true // No metadata = top-level node
-                };
-
-                matches_date && is_top_level
+                    false
+                }
             })
-            .collect();
+            .map(|node| &node.id);
 
-        Ok(filtered_nodes)
+        if let Some(date_node_id) = date_node_id {
+            // Step 3: Find all descendants of the date node (children, grandchildren, etc.)
+            let descendants = get_all_descendants(&all_nodes, date_node_id);
+            Ok(descendants)
+        } else {
+            // No date node found - return empty list
+            Ok(vec![])
+        }
     }
+
+    /// Navigate to a specific date with navigation context
+    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
+        // Get nodes for the requested date
+        let nodes = self.get_nodes_for_date(date).await?;
+
+        // Check if there are nodes on previous day
+        let previous_date = date - chrono::Duration::days(1);
+        let previous_nodes = self.get_nodes_for_date(previous_date).await.unwrap_or_default();
+        let has_previous = !previous_nodes.is_empty();
+
+        // Check if there are nodes on next day  
+        let next_date = date + chrono::Duration::days(1);
+        let next_nodes = self.get_nodes_for_date(next_date).await.unwrap_or_default();
+        let has_next = !next_nodes.is_empty();
+
+        Ok(NavigationResult {
+            date,
+            nodes,
+            has_previous,
+            has_next,
+        })
+    }
+}
+
+/// Helper function to get all descendants (children, grandchildren, etc.) of a node
+fn get_all_descendants(all_nodes: &[Node], parent_id: &NodeId) -> Vec<Node> {
+    let mut descendants = Vec::new();
+    let mut to_process = vec![parent_id.clone()];
+
+    while let Some(current_parent_id) = to_process.pop() {
+        // Find direct children of current parent
+        for node in all_nodes {
+            if let Some(metadata) = &node.metadata {
+                if let Some(node_parent_id) = metadata.get("parent_id") {
+                    if let Some(node_parent_str) = node_parent_id.as_str() {
+                        if node_parent_str == current_parent_id.to_string() {
+                            // This is a child - add it to results and queue for processing
+                            descendants.push(node.clone());
+                            to_process.push(node.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    descendants
 }
 
 /// Cross-modal search orchestration implementation for NodeSpaceService
@@ -1106,7 +1232,10 @@ For each reference, determine if it's exact, relative, event-based, or fuzzy.",
         // Strategy 1: Semantic search
         match self
             .data_store
-            .semantic_search_with_embedding(query_embedding.clone(), 20)
+            .semantic_search_with_embedding(
+                query_embedding.clone(),
+                constants::DEFAULT_MULTI_STRATEGY_LIMIT,
+            )
             .await
         {
             Ok(semantic_results) => {
@@ -1164,7 +1293,7 @@ For each reference, determine if it's exact, relative, event-based, or fuzzy.",
         });
 
         // Limit results
-        search_results.truncate(10);
+        search_results.truncate(constants::DEFAULT_FINAL_RESULT_LIMIT);
 
         Ok(search_results)
     }
@@ -1330,16 +1459,18 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
     async fn search_by_entity(&self, entity: &str) -> NodeSpaceResult<Vec<SearchResult>> {
         // For LanceDB: Simple content search by entity
         let all_nodes = self.data_store.query_nodes(entity).await?;
-        let nodes: Vec<_> = all_nodes.into_iter().take(10).collect();
+        let nodes: Vec<_> = all_nodes
+            .into_iter()
+            .take(constants::DEFAULT_MAX_RESULTS_PER_STRATEGY)
+            .collect();
         let results = nodes
             .into_iter()
             .enumerate()
-            .map(|(index, node)| {
-                SearchResult {
-                    node_id: node.id.clone(),
-                    node,
-                    score: 0.8 - (index as f32 * 0.05), // Decreasing score by position
-                }
+            .map(|(index, node)| SearchResult {
+                node_id: node.id.clone(),
+                node,
+                score: constants::BASE_CONFIDENCE_WITH_CONTEXT
+                    - (index as f32 * constants::SCORE_DECAY_FACTOR * 0.5),
             })
             .collect();
 
@@ -1364,7 +1495,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                     let nodes: Vec<_> = all_nodes
                         .into_iter()
                         .filter(|node| node.created_at.starts_with(&date_str))
-                        .take(10)
+                        .take(constants::DEFAULT_MAX_RESULTS_PER_STRATEGY)
                         .collect();
                     let results = nodes
                         .into_iter()
@@ -1372,7 +1503,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                         .map(|(index, node)| SearchResult {
                             node_id: node.id.clone(),
                             node,
-                            score: 0.9 - (index as f32 * 0.05),
+                            score: 0.9 - (index as f32 * constants::SCORE_DECAY_FACTOR * 0.5),
                         })
                         .collect();
 
@@ -1411,4 +1542,189 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
 
         Ok(results)
     }
+
+    /// Batch lookup for multiple node relationships (optimization for N+1 queries)
+    async fn get_batch_related_nodes(
+        &self,
+        node_ids: &[NodeId],
+        relationship_types: Vec<String>,
+    ) -> NodeSpaceResult<std::collections::HashMap<NodeId, Vec<NodeId>>> {
+        use std::collections::HashMap;
+
+        if node_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Get all nodes once to avoid multiple database calls
+        let all_nodes = self.data_store.query_nodes("").await.unwrap_or_default();
+        let mut result_map = HashMap::new();
+
+        // Initialize empty vectors for all requested node IDs
+        for node_id in node_ids {
+            result_map.insert(node_id.clone(), Vec::new());
+        }
+
+        // Process all nodes to find relationships
+        for node in all_nodes {
+            if let Some(metadata) = &node.metadata {
+                // Check mentions
+                if let Some(mentions) = metadata.get("mentions") {
+                    if let Some(mentions_array) = mentions.as_array() {
+                        for mention in mentions_array {
+                            if let Some(mention_str) = mention.as_str() {
+                                let mentioned_id = NodeId::from_string(mention_str.to_string());
+                                if let Some(related_list) = result_map.get_mut(&mentioned_id) {
+                                    related_list.push(node.id.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check specific relationship types if provided
+                if !relationship_types.is_empty() {
+                    if let Some(relationships) = metadata.get("relationships") {
+                        if let Some(rel_obj) = relationships.as_object() {
+                            for rel_type in &relationship_types {
+                                if let Some(targets) = rel_obj.get(rel_type) {
+                                    if let Some(targets_array) = targets.as_array() {
+                                        for target in targets_array {
+                                            if let Some(target_str) = target.as_str() {
+                                                let target_id =
+                                                    NodeId::from_string(target_str.to_string());
+                                                if let Some(related_list) =
+                                                    result_map.get_mut(&target_id)
+                                                {
+                                                    related_list.push(node.id.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result_map)
+    }
+
+    /// Helper method to gather context for query processing
+    async fn gather_query_context(
+        &self,
+        query: &str,
+    ) -> NodeSpaceResult<(Vec<String>, Vec<NodeId>)> {
+        let search_results = self
+            .semantic_search(query, constants::DEFAULT_SEARCH_LIMIT)
+            .await?;
+
+        let context: Vec<String> = search_results
+            .iter()
+            .filter_map(|result| result.node.content.as_str().map(|s| s.to_string()))
+            .collect();
+
+        let sources: Vec<NodeId> = search_results
+            .iter()
+            .map(|result| result.node_id.clone())
+            .collect();
+
+        Ok((context, sources))
+    }
+
+    /// Helper method to build contextual prompt with length management
+    fn build_contextual_prompt(&self, query: &str, context: &[String]) -> String {
+        let context_text = context.join("\n\n");
+        let max_context_len = self
+            .config
+            .performance_config
+            .context_window
+            .unwrap_or(constants::DEFAULT_CONTEXT_WINDOW)
+            .saturating_sub(query.len() + constants::PROMPT_STRUCTURE_RESERVE);
+
+        let truncated_context = if context_text.len() > max_context_len {
+            format!("{}...", &context_text[..max_context_len])
+        } else {
+            context_text
+        };
+
+        if truncated_context.is_empty() {
+            format!("Answer this question based on general knowledge: {}", query)
+        } else {
+            format!(
+                "Based on the following context, answer the question: {}\n\nContext:\n{}",
+                query, truncated_context
+            )
+        }
+    }
+
+    /// Helper method to generate contextual answer with fallback handling
+    async fn generate_contextual_answer(
+        &self,
+        prompt: &str,
+        sources: &[NodeId],
+    ) -> NodeSpaceResult<String> {
+        match self.nlp_engine.generate_text(prompt).await {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                // Handle text generation failure based on configuration
+                match self.config.offline_config.offline_fallback {
+                    OfflineFallback::Error => {
+                        Err(NodeSpaceError::ProcessingError(format!(
+                            "Text generation failed: {}",
+                            e
+                        )))
+                    }
+                    OfflineFallback::Stub => {
+                        Ok("I apologize, but I'm currently unable to generate a response due to AI system limitations. Please try again later.".to_string())
+                    }
+                    OfflineFallback::Cache => {
+                        if sources.is_empty() {
+                            Ok("I found no relevant information to answer your question.".to_string())
+                        } else {
+                            Ok(format!("I found {} related documents but cannot generate a detailed response at this time. Please review the source materials directly.", sources.len()))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Helper method to calculate response confidence
+    fn calculate_response_confidence(&self, context: &[String], answer: &str) -> f32 {
+        let base_confidence = if context.is_empty() {
+            constants::BASE_CONFIDENCE_NO_CONTEXT
+        } else {
+            constants::BASE_CONFIDENCE_WITH_CONTEXT
+        };
+
+        if answer.contains("currently unable") || answer.contains("cannot generate") {
+            base_confidence * constants::FALLBACK_CONFIDENCE_FACTOR
+        } else {
+            base_confidence
+        }
+    }
+
+    /// Helper method to generate related queries
+    fn generate_related_queries(&self, query: &str) -> Vec<String> {
+        vec![
+            format!(
+                "What else about {}?",
+                query.split_whitespace().last().unwrap_or("this topic")
+            ),
+            format!(
+                "How does {} work?",
+                query
+                    .split_whitespace()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ]
+    }
 }
+
+// Include tests module
+#[cfg(test)]
+mod tests;

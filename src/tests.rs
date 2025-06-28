@@ -1,0 +1,712 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{constants, NodeSpaceService, ServiceState, NodeSpaceConfig, OfflineFallback};
+    use async_trait::async_trait;
+    use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Mock DataStore implementation for testing
+    #[derive(Default)]
+    pub struct MockDataStore {
+        pub nodes: Arc<Mutex<HashMap<String, Node>>>,
+        pub query_responses: Arc<Mutex<HashMap<String, Vec<Node>>>>,
+        pub failure_mode: Arc<Mutex<Option<String>>>,
+    }
+
+    impl MockDataStore {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn with_failure_mode(failure_mode: &str) -> Self {
+            let store = Self::new();
+            *store.failure_mode.lock().unwrap() = Some(failure_mode.to_string());
+            store
+        }
+
+        pub fn add_node(&self, node: Node) {
+            self.nodes.lock().unwrap().insert(node.id.to_string(), node);
+        }
+
+        pub fn set_query_response(&self, query: &str, nodes: Vec<Node>) {
+            self.query_responses
+                .lock()
+                .unwrap()
+                .insert(query.to_string(), nodes);
+        }
+    }
+
+    #[async_trait]
+    impl nodespace_data_store::DataStore for MockDataStore {
+        async fn store_node(&self, node: Node) -> NodeSpaceResult<()> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "store_node" {
+                    return Err(NodeSpaceError::DatabaseError(
+                        "Mock store failure".to_string(),
+                    ));
+                }
+            }
+            self.add_node(node);
+            Ok(())
+        }
+
+        async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "get_node" {
+                    return Err(NodeSpaceError::DatabaseError(
+                        "Mock get failure".to_string(),
+                    ));
+                }
+            }
+            Ok(self.nodes.lock().unwrap().get(&id.to_string()).cloned())
+        }
+
+        async fn delete_node(&self, id: &NodeId) -> NodeSpaceResult<()> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "delete_node" {
+                    return Err(NodeSpaceError::DatabaseError(
+                        "Mock delete failure".to_string(),
+                    ));
+                }
+            }
+            self.nodes.lock().unwrap().remove(&id.to_string());
+            Ok(())
+        }
+
+        async fn query_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "query_nodes" {
+                    return Err(NodeSpaceError::DatabaseError(
+                        "Mock query failure".to_string(),
+                    ));
+                }
+            }
+
+            if let Some(response) = self.query_responses.lock().unwrap().get(query) {
+                return Ok(response.clone());
+            }
+
+            // Default behavior: search by content
+            let nodes = self.nodes.lock().unwrap();
+            let results: Vec<Node> = nodes
+                .values()
+                .filter(|node| {
+                    if let Some(content) = node.content.as_str() {
+                        content.to_lowercase().contains(&query.to_lowercase())
+                    } else {
+                        false
+                    }
+                })
+                .cloned()
+                .collect();
+            Ok(results)
+        }
+
+        async fn create_relationship(
+            &self,
+            _from: &NodeId,
+            _to: &NodeId,
+            _rel_type: &str,
+        ) -> NodeSpaceResult<()> {
+            Ok(())
+        }
+
+        async fn search_similar_nodes(
+            &self,
+            _embedding: Vec<f32>,
+            limit: usize,
+        ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            let nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let results = nodes
+                .into_iter()
+                .take(limit)
+                .map(|node| (node, 0.8))
+                .collect();
+            Ok(results)
+        }
+
+        async fn update_node_embedding(
+            &self,
+            _id: &NodeId,
+            _embedding: Vec<f32>,
+        ) -> NodeSpaceResult<()> {
+            Ok(())
+        }
+
+        async fn semantic_search_with_embedding(
+            &self,
+            _embedding: Vec<f32>,
+            limit: usize,
+        ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            let nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let results = nodes
+                .into_iter()
+                .take(limit)
+                .map(|node| (node, 0.8))
+                .collect();
+            Ok(results)
+        }
+
+        async fn create_image_node(
+            &self,
+            _image_node: nodespace_data_store::ImageNode,
+        ) -> NodeSpaceResult<String> {
+            Ok("mock_image_id".to_string())
+        }
+
+        async fn get_image_node(
+            &self,
+            _id: &str,
+        ) -> NodeSpaceResult<Option<nodespace_data_store::ImageNode>> {
+            Ok(None)
+        }
+
+        async fn search_multimodal(
+            &self,
+            _query_embedding: Vec<f32>,
+            _types: Vec<nodespace_data_store::NodeType>,
+        ) -> NodeSpaceResult<Vec<Node>> {
+            Ok(vec![])
+        }
+
+        async fn hybrid_multimodal_search(
+            &self,
+            _query_embedding: Vec<f32>,
+            _config: &nodespace_data_store::HybridSearchConfig,
+        ) -> NodeSpaceResult<Vec<nodespace_data_store::SearchResult>> {
+            Ok(vec![])
+        }
+    }
+
+    /// Mock NLP Engine for testing
+    #[derive(Default)]
+    pub struct MockNLPEngine {
+        pub embedding_responses: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+        pub text_responses: Arc<Mutex<HashMap<String, String>>>,
+        pub failure_mode: Arc<Mutex<Option<String>>>,
+    }
+
+    impl MockNLPEngine {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn with_failure_mode(failure_mode: &str) -> Self {
+            let engine = Self::new();
+            *engine.failure_mode.lock().unwrap() = Some(failure_mode.to_string());
+            engine
+        }
+
+        pub fn set_embedding_response(&self, text: &str, embedding: Vec<f32>) {
+            self.embedding_responses
+                .lock()
+                .unwrap()
+                .insert(text.to_string(), embedding);
+        }
+
+        pub fn set_text_response(&self, prompt: &str, response: &str) {
+            self.text_responses
+                .lock()
+                .unwrap()
+                .insert(prompt.to_string(), response.to_string());
+        }
+    }
+
+    #[async_trait]
+    impl nodespace_nlp_engine::NLPEngine for MockNLPEngine {
+        async fn generate_embedding(&self, text: &str) -> NodeSpaceResult<Vec<f32>> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "generate_embedding" {
+                    return Err(NodeSpaceError::ProcessingError(
+                        "Mock embedding failure".to_string(),
+                    ));
+                }
+            }
+
+            if let Some(response) = self.embedding_responses.lock().unwrap().get(text) {
+                return Ok(response.clone());
+            }
+
+            // Default: return a mock embedding
+            Ok(vec![0.1; constants::DEFAULT_EMBEDDING_DIMENSION])
+        }
+
+        async fn generate_text(&self, prompt: &str) -> NodeSpaceResult<String> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "generate_text" {
+                    return Err(NodeSpaceError::ProcessingError(
+                        "Mock text generation failure".to_string(),
+                    ));
+                }
+            }
+
+            if let Some(response) = self.text_responses.lock().unwrap().get(prompt) {
+                return Ok(response.clone());
+            }
+
+            // Default: return a mock response
+            Ok("Mock response".to_string())
+        }
+    }
+
+    /// Test helpers
+    fn create_test_node(id: &str, content: &str) -> Node {
+        let now = chrono::Utc::now().to_rfc3339();
+        Node {
+            id: NodeId::from_string(id.to_string()),
+            content: json!(content),
+            metadata: Some(json!({"test": true})),
+            created_at: now.clone(),
+            updated_at: now,
+            next_sibling: None,
+            previous_sibling: None,
+        }
+    }
+
+    fn create_test_service() -> NodeSpaceService<MockDataStore, MockNLPEngine> {
+        NodeSpaceService::new(MockDataStore::new(), MockNLPEngine::new())
+    }
+
+    #[tokio::test]
+    async fn test_service_initialization() {
+        let service = create_test_service();
+
+        // Service should start uninitialized
+        assert_eq!(service.get_state().await, ServiceState::Uninitialized);
+        assert!(!service.is_ready().await);
+
+        // Initialize service
+        let result = service.initialize().await;
+        assert!(result.is_ok());
+        assert_eq!(service.get_state().await, ServiceState::Ready);
+        assert!(service.is_ready().await);
+    }
+
+    #[tokio::test]
+    async fn test_service_initialization_failure() {
+        let data_store = MockDataStore::new();
+        let nlp_engine = MockNLPEngine::with_failure_mode("generate_embedding");
+        let service = NodeSpaceService::new(data_store, nlp_engine);
+
+        let result = service.initialize().await;
+        assert!(result.is_err());
+
+        match service.get_state().await {
+            ServiceState::Failed(_) => {}
+            _ => panic!("Expected Failed state"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_knowledge_node_success() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let content = "Test knowledge content";
+        let metadata = json!({"category": "test"});
+
+        let result = service.create_knowledge_node(content, metadata).await;
+        assert!(result.is_ok());
+
+        let node_id = result.unwrap();
+        let stored_node = service.data_store.get_node(&node_id).await.unwrap();
+        assert!(stored_node.is_some());
+
+        let node = stored_node.unwrap();
+        assert_eq!(node.content.as_str().unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn test_create_knowledge_node_not_ready() {
+        let service = create_test_service();
+        // Don't initialize service
+
+        let result = service.create_knowledge_node("test", json!({})).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            NodeSpaceError::InternalError(_) => {}
+            _ => panic!("Expected InternalError for service not ready"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_semantic_search() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Add test nodes
+        let node1 = create_test_node("1", "rust programming language");
+        let node2 = create_test_node("2", "python data science");
+        let node3 = create_test_node("3", "rust systems programming");
+
+        service.data_store.add_node(node1);
+        service.data_store.add_node(node2);
+        service.data_store.add_node(node3);
+
+        let results = service.semantic_search("rust", 10).await.unwrap();
+        assert_eq!(results.len(), 2); // Should find 2 rust-related nodes
+
+        // Check scoring
+        assert!(results[0].score >= results[1].score); // Results should be sorted by score
+        assert!(results[0].score >= constants::MIN_SEARCH_SCORE);
+    }
+
+    #[tokio::test]
+    async fn test_process_query_with_context() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Add test node
+        let node = create_test_node("1", "Rust is a systems programming language");
+        service.data_store.add_node(node);
+
+        // Set up mock NLP response
+        service.nlp_engine.set_text_response(
+            &format!("Based on the following context, answer the question: What is Rust?\n\nContext:\nRust is a systems programming language"),
+            "Rust is a systems programming language focused on safety and performance."
+        );
+
+        let response = service.process_query("What is Rust?").await.unwrap();
+
+        assert!(!response.answer.is_empty());
+        assert!(!response.sources.is_empty());
+        assert!(response.confidence >= constants::BASE_CONFIDENCE_WITH_CONTEXT);
+        assert!(!response.related_queries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_query_no_context() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // No nodes added, so no context will be found
+        let response = service
+            .process_query("What is quantum computing?")
+            .await
+            .unwrap();
+
+        assert!(!response.answer.is_empty());
+        assert!(response.sources.is_empty());
+        assert_eq!(response.confidence, constants::BASE_CONFIDENCE_NO_CONTEXT);
+    }
+
+    #[tokio::test]
+    async fn test_update_node() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Create and store a node
+        let original_content = "Original content";
+        let node_id = service
+            .create_knowledge_node(original_content, json!({}))
+            .await
+            .unwrap();
+
+        // Update the node
+        let new_content = "Updated content";
+        let result = service.update_node(&node_id, new_content).await;
+        assert!(result.is_ok());
+
+        // Verify the update
+        let updated_node = service
+            .data_store
+            .get_node(&node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_node.content.as_str().unwrap(), new_content);
+        assert_ne!(updated_node.created_at, updated_node.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_node() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let fake_id = NodeId::from_string("nonexistent".to_string());
+        let result = service.update_node(&fake_id, "new content").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NodeSpaceError::NotFound(_) => {}
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_related_nodes() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let target_id = NodeId::from_string("target".to_string());
+
+        // Create nodes with relationships in metadata
+        let mut related_node = create_test_node("related", "Related content");
+        related_node.metadata = Some(json!({
+            "mentions": [target_id.to_string()]
+        }));
+
+        let unrelated_node = create_test_node("unrelated", "Unrelated content");
+
+        service.data_store.add_node(related_node);
+        service.data_store.add_node(unrelated_node);
+
+        let related_ids = service.get_related_nodes(&target_id, vec![]).await.unwrap();
+        assert_eq!(related_ids.len(), 1);
+        assert_eq!(related_ids[0].to_string(), "related");
+    }
+
+    #[tokio::test]
+    async fn test_generate_insights() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Create test nodes
+        let node1 = create_test_node("1", "AI is transforming healthcare");
+        let node2 = create_test_node("2", "Machine learning improves diagnosis");
+        let node3 = create_test_node("3", "Deep learning analyzes medical images");
+
+        service.data_store.add_node(node1);
+        service.data_store.add_node(node2);
+        service.data_store.add_node(node3);
+
+        // Set up mock response
+        service.nlp_engine.set_text_response(
+            &format!("Analyze the following content and provide key insights, patterns, and connections:\n\nAI is transforming healthcare\n\n---\n\nMachine learning improves diagnosis\n\n---\n\nDeep learning analyzes medical images\n\nProvide a concise summary with 3-5 key insights:"),
+            "Key insights: 1) AI is revolutionizing healthcare, 2) Multiple AI technologies are being applied, 3) Focus on diagnostic improvements"
+        );
+
+        let node_ids = vec![
+            NodeId::from_string("1".to_string()),
+            NodeId::from_string("2".to_string()),
+            NodeId::from_string("3".to_string()),
+        ];
+
+        let insights = service.generate_insights(node_ids).await.unwrap();
+        assert!(!insights.is_empty());
+        assert!(insights.contains("Key insights"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_insights_empty_input() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let insights = service.generate_insights(vec![]).await.unwrap();
+        assert_eq!(insights, "No nodes provided for insight generation.");
+    }
+
+    #[tokio::test]
+    async fn test_node_structure_operations() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Create test nodes
+        let parent_id = NodeId::from_string("parent".to_string());
+        let child_id = NodeId::from_string("child".to_string());
+
+        let parent_node = create_test_node("parent", "Parent content");
+        let child_node = create_test_node("child", "Child content");
+
+        service.data_store.add_node(parent_node);
+        service.data_store.add_node(child_node);
+
+        // Test indent operation (make child_node a child of parent_node)
+        let result = service
+            .update_node_structure(&child_id, "indent", Some(&parent_id), None)
+            .await;
+        assert!(result.is_ok());
+
+        // Verify the relationship was set
+        let updated_child = service
+            .data_store
+            .get_node(&child_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated_child.metadata.is_some());
+        let metadata = updated_child.metadata.unwrap();
+        assert_eq!(
+            metadata["parent_id"].as_str().unwrap(),
+            parent_id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_node_parent() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let parent_id = NodeId::from_string("parent".to_string());
+        let child_id = NodeId::from_string("child".to_string());
+
+        let child_node = create_test_node("child", "Child content");
+        service.data_store.add_node(child_node);
+
+        // Set parent
+        let result = service.set_node_parent(&child_id, Some(&parent_id)).await;
+        assert!(result.is_ok());
+
+        // Verify parent was set
+        let updated_child = service
+            .data_store
+            .get_node(&child_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = updated_child.metadata.unwrap();
+        assert_eq!(
+            metadata["parent_id"].as_str().unwrap(),
+            parent_id.to_string()
+        );
+
+        // Remove parent
+        let result = service.set_node_parent(&child_id, None).await;
+        assert!(result.is_ok());
+
+        // Verify parent was removed
+        let updated_child = service
+            .data_store
+            .get_node(&child_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = updated_child.metadata.unwrap();
+        assert!(metadata.get("parent_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_sibling_order() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let node1_id = NodeId::from_string("node1".to_string());
+        let node2_id = NodeId::from_string("node2".to_string());
+        let node3_id = NodeId::from_string("node3".to_string());
+
+        let node1 = create_test_node("node1", "First node");
+        let node2 = create_test_node("node2", "Second node");
+        let node3 = create_test_node("node3", "Third node");
+
+        service.data_store.add_node(node1);
+        service.data_store.add_node(node2);
+        service.data_store.add_node(node3);
+
+        // Set node2 between node1 and node3
+        let result = service
+            .update_sibling_order(&node2_id, Some(&node1_id), Some(&node3_id))
+            .await;
+        assert!(result.is_ok());
+
+        // Verify the sibling relationships
+        let updated_node2 = service
+            .data_store
+            .get_node(&node2_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_node2.previous_sibling.unwrap(), node1_id);
+        assert_eq!(updated_node2.next_sibling.unwrap(), node3_id);
+
+        let updated_node1 = service
+            .data_store
+            .get_node(&node1_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_node1.next_sibling.unwrap(), node2_id);
+
+        let updated_node3 = service
+            .data_store
+            .get_node(&node3_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_node3.previous_sibling.unwrap(), node2_id);
+    }
+
+    #[tokio::test]
+    async fn test_date_navigation() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+        let today_str = today.format("%Y-%m-%d").to_string();
+
+        // Create nodes with today's date
+        let mut node1 = create_test_node("1", "Today's content 1");
+        let mut node2 = create_test_node("2", "Today's content 2");
+        let mut node3 = create_test_node("3", "Child node");
+
+        // Set created_at to today
+        node1.created_at = format!("{}T10:00:00Z", today_str);
+        node2.created_at = format!("{}T11:00:00Z", today_str);
+        node3.created_at = format!("{}T12:00:00Z", today_str);
+
+        // Make node3 a child (should be filtered out)
+        node3.metadata = Some(json!({"parent_id": "1"}));
+
+        service.data_store.add_node(node1);
+        service.data_store.add_node(node2);
+        service.data_store.add_node(node3);
+
+        let today_nodes = service.get_nodes_for_date(today).await.unwrap();
+
+        // Should return only top-level nodes (node1 and node2, not node3)
+        assert_eq!(today_nodes.len(), 2);
+
+        let node_ids: Vec<String> = today_nodes.iter().map(|n| n.id.to_string()).collect();
+        assert!(node_ids.contains(&"1".to_string()));
+        assert!(node_ids.contains(&"2".to_string()));
+        assert!(!node_ids.contains(&"3".to_string())); // Child node filtered out
+    }
+
+    #[tokio::test]
+    async fn test_offline_fallback_behavior() {
+        let data_store = MockDataStore::new();
+        let nlp_engine = MockNLPEngine::with_failure_mode("generate_text");
+
+        // Create service with offline fallback enabled
+        let mut config = NodeSpaceConfig::default();
+        config.offline_config.offline_fallback = OfflineFallback::Cache;
+
+        let service = NodeSpaceService::with_config(data_store, nlp_engine, config);
+        service.initialize().await.unwrap(); // Should succeed despite NLP failure
+
+        // Process query should work with fallback
+        let response = service.process_query("test query").await.unwrap();
+        assert!(!response.answer.is_empty());
+        assert!(response.confidence < constants::BASE_CONFIDENCE_WITH_CONTEXT);
+    }
+
+    #[tokio::test]
+    async fn test_performance_config_limits() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Add many test nodes
+        for i in 0..100 {
+            let node = create_test_node(&i.to_string(), &format!("Content {}", i));
+            service.data_store.add_node(node);
+        }
+
+        // Test that max_batch_size is respected
+        let results = service.semantic_search("Content", 50).await.unwrap();
+        assert!(results.len() <= constants::DEFAULT_MAX_BATCH_SIZE);
+    }
+
+    #[tokio::test]
+    async fn test_constants_usage() {
+        // Test that our constants are properly defined and reasonable
+        assert!(constants::DEFAULT_MAX_BATCH_SIZE > 0);
+        assert!(constants::DEFAULT_CONTEXT_WINDOW > 0);
+        assert!(constants::DEFAULT_TEMPERATURE >= 0.0 && constants::DEFAULT_TEMPERATURE <= 1.0);
+        assert!(constants::MIN_SEARCH_SCORE >= 0.0 && constants::MIN_SEARCH_SCORE <= 1.0);
+        assert!(constants::BASE_CONFIDENCE_WITH_CONTEXT > constants::BASE_CONFIDENCE_NO_CONTEXT);
+        assert!(constants::FALLBACK_CONFIDENCE_FACTOR < 1.0);
+    }
+}
