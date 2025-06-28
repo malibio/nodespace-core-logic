@@ -1,8 +1,8 @@
+use async_trait::async_trait;
 use nodespace_core_logic::{
     constants, monitoring, DataStore, NLPEngine, NodeSpaceService, ServiceState,
 };
 use nodespace_core_types::{Node, NodeId, NodeSpaceResult};
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

@@ -1,12 +1,46 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{constants, NodeSpaceService, ServiceState, NodeSpaceConfig, OfflineFallback};
+    use crate::{
+        constants, CoreLogic, DateNavigation, NodeSpaceConfig, NodeSpaceService, OfflineFallback,
+        ServiceState,
+    };
     use async_trait::async_trait;
     use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
+    use nodespace_data_store::{
+        DataStore, HybridSearchConfig, ImageNode, NodeType, SearchResult as DataStoreSearchResult,
+    };
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    /// Mock types for testing
+    #[derive(Debug, Clone)]
+    pub struct ImageNode {
+        pub id: String,
+        pub image_data: Vec<u8>,
+        pub embedding: Vec<f32>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum NodeType {
+        Text,
+        Image,
+        Date,
+        Task,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct HybridSearchConfig {
+        pub max_results: usize,
+        pub min_similarity_threshold: f64,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DataStoreSearchResult {
+        pub node: Node,
+        pub score: f32,
+    }
 
     /// Mock DataStore implementation for testing
     #[derive(Default)]
@@ -41,7 +75,7 @@ mod tests {
 
     #[async_trait]
     impl nodespace_data_store::DataStore for MockDataStore {
-        async fn store_node(&self, node: Node) -> NodeSpaceResult<()> {
+        async fn store_node(&self, node: Node) -> NodeSpaceResult<NodeId> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "store_node" {
                     return Err(NodeSpaceError::DatabaseError(
@@ -49,8 +83,9 @@ mod tests {
                     ));
                 }
             }
+            let node_id = node.id.clone();
             self.add_node(node);
-            Ok(())
+            Ok(node_id)
         }
 
         async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>> {
@@ -150,24 +185,18 @@ mod tests {
             Ok(results)
         }
 
-        async fn create_image_node(
-            &self,
-            _image_node: nodespace_data_store::ImageNode,
-        ) -> NodeSpaceResult<String> {
+        async fn create_image_node(&self, _image_node: ImageNode) -> NodeSpaceResult<String> {
             Ok("mock_image_id".to_string())
         }
 
-        async fn get_image_node(
-            &self,
-            _id: &str,
-        ) -> NodeSpaceResult<Option<nodespace_data_store::ImageNode>> {
+        async fn get_image_node(&self, _id: &str) -> NodeSpaceResult<Option<ImageNode>> {
             Ok(None)
         }
 
         async fn search_multimodal(
             &self,
             _query_embedding: Vec<f32>,
-            _types: Vec<nodespace_data_store::NodeType>,
+            _types: Vec<NodeType>,
         ) -> NodeSpaceResult<Vec<Node>> {
             Ok(vec![])
         }
@@ -175,9 +204,35 @@ mod tests {
         async fn hybrid_multimodal_search(
             &self,
             _query_embedding: Vec<f32>,
-            _config: &nodespace_data_store::HybridSearchConfig,
-        ) -> NodeSpaceResult<Vec<nodespace_data_store::SearchResult>> {
+            _config: &HybridSearchConfig,
+        ) -> NodeSpaceResult<Vec<DataStoreSearchResult>> {
             Ok(vec![])
+        }
+
+        async fn update_node(&self, node: Node) -> NodeSpaceResult<()> {
+            let node_id = node.id.clone();
+            self.nodes.lock().unwrap().insert(node_id.to_string(), node);
+            Ok(())
+        }
+
+        async fn update_node_with_embedding(
+            &self,
+            node: Node,
+            _embedding: Vec<f32>,
+        ) -> NodeSpaceResult<()> {
+            let node_id = node.id.clone();
+            self.nodes.lock().unwrap().insert(node_id.to_string(), node);
+            Ok(())
+        }
+
+        async fn store_node_with_embedding(
+            &self,
+            node: Node,
+            _embedding: Vec<f32>,
+        ) -> NodeSpaceResult<NodeId> {
+            let node_id = node.id.clone();
+            self.add_node(node);
+            Ok(node_id)
         }
     }
 
@@ -249,6 +304,47 @@ mod tests {
 
             // Default: return a mock response
             Ok("Mock response".to_string())
+        }
+
+        async fn batch_embeddings(&self, texts: &[String]) -> NodeSpaceResult<Vec<Vec<f32>>> {
+            let mut results = Vec::new();
+            for _text in texts {
+                results.push(vec![0.1; constants::DEFAULT_EMBEDDING_DIMENSION]);
+            }
+            Ok(results)
+        }
+
+        async fn generate_text_enhanced(
+            &self,
+            _request: nodespace_nlp_engine::TextGenerationRequest,
+        ) -> NodeSpaceResult<nodespace_nlp_engine::EnhancedTextGenerationResponse> {
+            Ok(nodespace_nlp_engine::EnhancedTextGenerationResponse {
+                text: "Mock enhanced response".to_string(),
+                tokens_used: 50,
+                generation_metrics: nodespace_nlp_engine::GenerationMetrics {
+                    generation_time_ms: 100,
+                    context_tokens: 20,
+                    response_tokens: 50,
+                    temperature_used: 0.7,
+                },
+                context_utilization: nodespace_nlp_engine::ContextUtilization {
+                    context_referenced: true,
+                    sources_mentioned: vec!["mock_source".to_string()],
+                    relevance_score: 0.8,
+                },
+            })
+        }
+
+        async fn generate_surrealql(
+            &self,
+            _natural_query: &str,
+            _context: &str,
+        ) -> NodeSpaceResult<String> {
+            Ok("SELECT * FROM mock;".to_string())
+        }
+
+        fn embedding_dimensions(&self) -> usize {
+            constants::DEFAULT_EMBEDDING_DIMENSION
         }
     }
 

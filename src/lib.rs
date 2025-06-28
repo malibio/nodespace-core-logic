@@ -9,6 +9,36 @@ use tokio::sync::RwLock;
 pub use nodespace_data_store::DataStore;
 pub use nodespace_nlp_engine::NLPEngine;
 
+// Import additional types for embedding generation bridge
+use nodespace_data_store::DataStoreError;
+use nodespace_data_store::EmbeddingGenerator as DataStoreEmbeddingGenerator;
+
+/// Adapter that bridges NLPEngine to DataStore's EmbeddingGenerator trait
+/// This allows the data store to automatically generate embeddings using the NLP engine
+pub struct NLPEmbeddingAdapter<N: NLPEngine> {
+    nlp_engine: N,
+}
+
+impl<N: NLPEngine> NLPEmbeddingAdapter<N> {
+    pub fn new(nlp_engine: N) -> Self {
+        Self { nlp_engine }
+    }
+}
+
+#[async_trait]
+impl<N: NLPEngine + Send + Sync> DataStoreEmbeddingGenerator for NLPEmbeddingAdapter<N> {
+    async fn generate_embedding(&self, content: &str) -> Result<Vec<f32>, DataStoreError> {
+        // Bridge to the NLPEngine trait implementation
+        match self.nlp_engine.generate_embedding(content).await {
+            Ok(embedding) => Ok(embedding),
+            Err(e) => Err(DataStoreError::EmbeddingError(format!(
+                "NLP engine embedding failed: {}",
+                e
+            ))),
+        }
+    }
+}
+
 /// Simple performance monitoring (compatible with all dependencies)
 pub mod monitoring {
     use std::time::Instant;
@@ -222,22 +252,35 @@ impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine
         use nodespace_data_store::LanceDataStore;
         use nodespace_nlp_engine::LocalNLPEngine;
 
+        // Initialize NLP engine with optional model directory
+        let nlp_engine1 = if let Some(model_dir) = model_directory {
+            LocalNLPEngine::with_model_directory(model_dir)
+        } else {
+            LocalNLPEngine::new() // Uses smart path resolution
+        };
+
+        // Create a second NLP engine instance for the adapter
+        let nlp_engine2 = if let Some(model_dir) = model_directory {
+            LocalNLPEngine::with_model_directory(model_dir)
+        } else {
+            LocalNLPEngine::new() // Uses smart path resolution
+        };
+
         // Initialize data store with injected database path
-        let data_store = LanceDataStore::new(database_path).await.map_err(|e| {
+        let mut data_store = LanceDataStore::new(database_path).await.map_err(|e| {
             NodeSpaceError::InternalError(format!(
                 "Failed to initialize data store at '{}': {}",
                 database_path, e
             ))
         })?;
 
-        // Initialize NLP engine with optional model directory
-        let nlp_engine = if let Some(model_dir) = model_directory {
-            LocalNLPEngine::with_model_directory(model_dir)
-        } else {
-            LocalNLPEngine::new() // Uses smart path resolution
-        };
+        // Create an adapter to bridge NLP engine to data store's embedding generator interface
+        let embedding_adapter = NLPEmbeddingAdapter::new(nlp_engine2);
 
-        Ok(Self::new(data_store, nlp_engine))
+        // Set the adapter as the embedding generator for automatic embedding handling
+        data_store.set_embedding_generator(Box::new(embedding_adapter));
+
+        Ok(Self::new(data_store, nlp_engine1))
     }
 
     /// Factory method for development environment
@@ -564,33 +607,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             previous_sibling: None,
         };
 
-        // Generate embeddings with improved error handling
-        let embedding_result = match self.nlp_engine.generate_embedding(content).await {
-            Ok(embedding) => Some(embedding),
-            Err(e) => {
-                // Handle embedding failure based on configuration
-                match self.config.offline_config.offline_fallback {
-                    OfflineFallback::Error => {
-                        return Err(NodeSpaceError::ProcessingError(format!(
-                            "Embedding generation failed: {}",
-                            e
-                        )));
-                    }
-                    OfflineFallback::Stub | OfflineFallback::Cache => {
-                        // Continue without embeddings, log warning
-                        eprintln!("Warning: Embedding generation failed, continuing without semantic search: {}", e);
-                        None
-                    }
-                }
-            }
-        };
-
-        // Store the node with embedding if available, or without if in offline mode
-        if let Some(embedding) = embedding_result {
-            self.data_store.store_node_with_embedding(node, embedding).await?;
-        } else {
-            self.data_store.store_node(node).await?;
-        }
+        // Store the node - data store will automatically generate embeddings using the EmbeddingGenerator
+        self.data_store.store_node(node).await?;
 
         timer.complete_success();
         Ok(node_id)
@@ -1033,7 +1051,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
         // Step 2: Find the date node - the node that represents this date
         let date_str = date.format("%Y-%m-%d").to_string();
         let date_header = format!("# {}", date.format("%B %-d, %Y")); // e.g., "# June 27, 2025"
-        
+
         let date_node_id = all_nodes
             .iter()
             .find(|node| {
@@ -1041,9 +1059,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
                 if let Some(content) = node.content.as_str() {
                     // Remove surrounding quotes if present and trim
                     let clean_content = content.trim().trim_matches('"').trim();
-                    clean_content == date_header || 
-                    clean_content.starts_with(&format!("# {}", date_str)) ||
-                    clean_content == format!("# {}", date_str)
+                    clean_content == date_header
+                        || clean_content.starts_with(&format!("# {}", date_str))
+                        || clean_content == format!("# {}", date_str)
                 } else {
                     false
                 }
@@ -1067,10 +1085,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
 
         // Check if there are nodes on previous day
         let previous_date = date - chrono::Duration::days(1);
-        let previous_nodes = self.get_nodes_for_date(previous_date).await.unwrap_or_default();
+        let previous_nodes = self
+            .get_nodes_for_date(previous_date)
+            .await
+            .unwrap_or_default();
         let has_previous = !previous_nodes.is_empty();
 
-        // Check if there are nodes on next day  
+        // Check if there are nodes on next day
         let next_date = date + chrono::Duration::days(1);
         let next_nodes = self.get_nodes_for_date(next_date).await.unwrap_or_default();
         let has_next = !next_nodes.is_empty();
