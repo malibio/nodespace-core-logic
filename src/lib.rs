@@ -1,8 +1,11 @@
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 // Import traits from their respective repositories
@@ -36,6 +39,597 @@ impl<N: NLPEngine + Send + Sync> DataStoreEmbeddingGenerator for NLPEmbeddingAda
                 e
             ))),
         }
+    }
+}
+
+/// Smart embedding cache with dependency invalidation for enhanced RAG performance
+pub mod smart_embedding_cache {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    /// Content hash for cache keys
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct ContentHash(pub String);
+
+    impl ContentHash {
+        pub fn from_content(content: &str) -> Self {
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            Self(format!("{:x}", hasher.finish()))
+        }
+    }
+
+    /// Context hash for contextual embeddings
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct ContextHash {
+        pub content_hash: ContentHash,
+        pub parent_hash: Option<ContentHash>,
+        pub sibling_hashes: Vec<ContentHash>,
+        pub mention_hashes: Vec<ContentHash>,
+        pub strategy: ContextStrategy,
+    }
+
+    /// Hierarchical path hash for hierarchical embeddings
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct PathHash {
+        pub content_hash: ContentHash,
+        pub path_hashes: Vec<ContentHash>, // From root to this node
+    }
+
+    /// Context strategy for embedding generation
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum ContextStrategy {
+        RuleBased,    // Fast rule-based context generation
+        Phi4Enhanced, // Phi-4 curated context (future)
+        Adaptive,     // Choose strategy based on content
+    }
+
+    /// Relationship fingerprint for tracking changes
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RelationshipFingerprint {
+        pub parent_id: Option<NodeId>,
+        pub sibling_ids: Vec<NodeId>,
+        pub mention_ids: Vec<NodeId>,
+        pub last_modified: DateTime<Utc>,
+    }
+
+    /// Cache entry with metadata
+    #[derive(Debug, Clone)]
+    pub struct CacheEntry {
+        pub embedding: Vec<f32>,
+        pub created_at: Instant,
+        pub last_accessed: Instant,
+        pub access_count: u64,
+        pub fingerprint: Option<RelationshipFingerprint>,
+    }
+
+    impl CacheEntry {
+        pub fn new(embedding: Vec<f32>, fingerprint: Option<RelationshipFingerprint>) -> Self {
+            let now = Instant::now();
+            Self {
+                embedding,
+                created_at: now,
+                last_accessed: now,
+                access_count: 1,
+                fingerprint,
+            }
+        }
+
+        pub fn access(&mut self) {
+            self.last_accessed = Instant::now();
+            self.access_count += 1;
+        }
+    }
+
+    /// LRU cache implementation for embeddings
+    #[derive(Debug)]
+    pub struct LruCache<K: Clone + Eq + Hash, V> {
+        map: HashMap<K, V>,
+        access_order: Vec<K>,
+        capacity: usize,
+    }
+
+    impl<K: Clone + Eq + Hash, V> LruCache<K, V> {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                map: HashMap::new(),
+                access_order: Vec::new(),
+                capacity,
+            }
+        }
+
+        pub fn get(&mut self, key: &K) -> Option<&mut V> {
+            if self.map.contains_key(key) {
+                // Move to end (most recently used)
+                if let Some(pos) = self.access_order.iter().position(|k| k == key) {
+                    let key = self.access_order.remove(pos);
+                    self.access_order.push(key);
+                }
+                self.map.get_mut(key)
+            } else {
+                None
+            }
+        }
+
+        pub fn insert(&mut self, key: K, value: V) {
+            if self.map.contains_key(&key) {
+                // Update existing
+                self.map.insert(key.clone(), value);
+                // Move to end
+                if let Some(pos) = self.access_order.iter().position(|k| k == &key) {
+                    let key = self.access_order.remove(pos);
+                    self.access_order.push(key);
+                }
+            } else {
+                // Insert new
+                if self.map.len() >= self.capacity {
+                    // Evict least recently used
+                    if let Some(oldest_key) = self.access_order.first().cloned() {
+                        self.map.remove(&oldest_key);
+                        self.access_order.remove(0);
+                    }
+                }
+                self.map.insert(key.clone(), value);
+                self.access_order.push(key);
+            }
+        }
+
+        pub fn remove(&mut self, key: &K) -> Option<V> {
+            if let Some(value) = self.map.remove(key) {
+                if let Some(pos) = self.access_order.iter().position(|k| k == key) {
+                    self.access_order.remove(pos);
+                }
+                Some(value)
+            } else {
+                None
+            }
+        }
+
+        pub fn clear(&mut self) {
+            self.map.clear();
+            self.access_order.clear();
+        }
+
+        pub fn len(&self) -> usize {
+            self.map.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.map.is_empty()
+        }
+
+        pub fn capacity(&self) -> usize {
+            self.capacity
+        }
+    }
+
+    /// Cache performance metrics
+    #[derive(Debug, Default, Clone)]
+    pub struct CacheMetrics {
+        pub individual_hits: u64,
+        pub individual_misses: u64,
+        pub contextual_hits: u64,
+        pub contextual_misses: u64,
+        pub hierarchical_hits: u64,
+        pub hierarchical_misses: u64,
+        pub invalidations: u64,
+        pub memory_usage_bytes: usize,
+        pub last_reset: Option<Instant>,
+    }
+
+    impl CacheMetrics {
+        pub fn new() -> Self {
+            Self {
+                last_reset: Some(Instant::now()),
+                ..Default::default()
+            }
+        }
+
+        pub fn individual_hit_rate(&self) -> f64 {
+            let total = self.individual_hits + self.individual_misses;
+            if total > 0 {
+                self.individual_hits as f64 / total as f64
+            } else {
+                0.0
+            }
+        }
+
+        pub fn contextual_hit_rate(&self) -> f64 {
+            let total = self.contextual_hits + self.contextual_misses;
+            if total > 0 {
+                self.contextual_hits as f64 / total as f64
+            } else {
+                0.0
+            }
+        }
+
+        pub fn hierarchical_hit_rate(&self) -> f64 {
+            let total = self.hierarchical_hits + self.hierarchical_misses;
+            if total > 0 {
+                self.hierarchical_hits as f64 / total as f64
+            } else {
+                0.0
+            }
+        }
+
+        pub fn overall_hit_rate(&self) -> f64 {
+            let total_hits = self.individual_hits + self.contextual_hits + self.hierarchical_hits;
+            let total_misses =
+                self.individual_misses + self.contextual_misses + self.hierarchical_misses;
+            let total = total_hits + total_misses;
+            if total > 0 {
+                total_hits as f64 / total as f64
+            } else {
+                0.0
+            }
+        }
+
+        pub fn reset(&mut self) {
+            *self = Self::new();
+        }
+    }
+
+    /// Smart embedding cache with multi-tier architecture and dependency tracking
+    #[derive(Debug)]
+    pub struct SmartEmbeddingCache {
+        // Tiered cache storage
+        individual_cache: LruCache<ContentHash, CacheEntry>,
+        contextual_cache: LruCache<ContextHash, CacheEntry>,
+        hierarchical_cache: LruCache<PathHash, CacheEntry>,
+
+        // Dependency tracking
+        dependency_graph: HashMap<NodeId, HashSet<NodeId>>, // Who depends on this node
+        relationship_fingerprints: HashMap<NodeId, RelationshipFingerprint>,
+
+        // Performance monitoring
+        metrics: CacheMetrics,
+
+        // Configuration
+        max_individual_entries: usize,
+        max_contextual_entries: usize,
+        max_hierarchical_entries: usize,
+        cache_ttl: Duration,
+    }
+
+    impl Default for SmartEmbeddingCache {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl SmartEmbeddingCache {
+        pub fn new() -> Self {
+            Self::with_capacity(10000, 5000, 2000)
+        }
+
+        pub fn with_capacity(
+            individual_capacity: usize,
+            contextual_capacity: usize,
+            hierarchical_capacity: usize,
+        ) -> Self {
+            Self {
+                individual_cache: LruCache::new(individual_capacity),
+                contextual_cache: LruCache::new(contextual_capacity),
+                hierarchical_cache: LruCache::new(hierarchical_capacity),
+                dependency_graph: HashMap::new(),
+                relationship_fingerprints: HashMap::new(),
+                metrics: CacheMetrics::new(),
+                max_individual_entries: individual_capacity,
+                max_contextual_entries: contextual_capacity,
+                max_hierarchical_entries: hierarchical_capacity,
+                cache_ttl: Duration::from_secs(3600), // 1 hour TTL
+            }
+        }
+
+        /// Get individual embedding from cache
+        pub fn get_individual_embedding(&mut self, content_hash: &ContentHash) -> Option<Vec<f32>> {
+            if let Some(entry) = self.individual_cache.get(content_hash) {
+                entry.access();
+                self.metrics.individual_hits += 1;
+                Some(entry.embedding.clone())
+            } else {
+                self.metrics.individual_misses += 1;
+                None
+            }
+        }
+
+        /// Cache individual embedding
+        pub fn cache_individual_embedding(
+            &mut self,
+            content_hash: ContentHash,
+            embedding: Vec<f32>,
+        ) {
+            let entry = CacheEntry::new(embedding, None);
+            self.individual_cache.insert(content_hash, entry);
+            self.update_memory_usage();
+        }
+
+        /// Get contextual embedding from cache
+        pub fn get_contextual_embedding(&mut self, context_hash: &ContextHash) -> Option<Vec<f32>> {
+            // First, check if the entry exists
+            let has_entry = self.contextual_cache.map.contains_key(context_hash);
+
+            if !has_entry {
+                self.metrics.contextual_misses += 1;
+                return None;
+            }
+
+            // Check validity and access the entry
+            let embedding = if let Some(entry) = self.contextual_cache.get(context_hash) {
+                // Create a temporary clone to check validity without borrowing self
+                let is_expired = entry.created_at.elapsed() > self.cache_ttl;
+
+                if is_expired {
+                    // Entry is expired, will be removed
+                    None
+                } else {
+                    // Entry is valid, access it and return embedding
+                    entry.access();
+                    Some(entry.embedding.clone())
+                }
+            } else {
+                None
+            };
+
+            match embedding {
+                Some(emb) => {
+                    self.metrics.contextual_hits += 1;
+                    Some(emb)
+                }
+                None => {
+                    // Entry is stale, remove it
+                    self.contextual_cache.remove(context_hash);
+                    self.metrics.contextual_misses += 1;
+                    None
+                }
+            }
+        }
+
+        /// Cache contextual embedding with relationship fingerprint
+        pub fn cache_contextual_embedding(
+            &mut self,
+            context_hash: ContextHash,
+            embedding: Vec<f32>,
+            fingerprint: RelationshipFingerprint,
+        ) {
+            let entry = CacheEntry::new(embedding, Some(fingerprint));
+            self.contextual_cache.insert(context_hash, entry);
+            self.update_memory_usage();
+        }
+
+        /// Get hierarchical embedding from cache
+        pub fn get_hierarchical_embedding(&mut self, path_hash: &PathHash) -> Option<Vec<f32>> {
+            // First, check if the entry exists
+            let has_entry = self.hierarchical_cache.map.contains_key(path_hash);
+
+            if !has_entry {
+                self.metrics.hierarchical_misses += 1;
+                return None;
+            }
+
+            // Check validity and access the entry
+            let embedding = if let Some(entry) = self.hierarchical_cache.get(path_hash) {
+                // Create a temporary clone to check validity without borrowing self
+                let is_expired = entry.created_at.elapsed() > self.cache_ttl;
+
+                if is_expired {
+                    // Entry is expired, will be removed
+                    None
+                } else {
+                    // Entry is valid, access it and return embedding
+                    entry.access();
+                    Some(entry.embedding.clone())
+                }
+            } else {
+                None
+            };
+
+            match embedding {
+                Some(emb) => {
+                    self.metrics.hierarchical_hits += 1;
+                    Some(emb)
+                }
+                None => {
+                    // Entry is stale, remove it
+                    self.hierarchical_cache.remove(path_hash);
+                    self.metrics.hierarchical_misses += 1;
+                    None
+                }
+            }
+        }
+
+        /// Cache hierarchical embedding
+        pub fn cache_hierarchical_embedding(
+            &mut self,
+            path_hash: PathHash,
+            embedding: Vec<f32>,
+            fingerprint: RelationshipFingerprint,
+        ) {
+            let entry = CacheEntry::new(embedding, Some(fingerprint));
+            self.hierarchical_cache.insert(path_hash, entry);
+            self.update_memory_usage();
+        }
+
+        /// Add dependency relationship for cache invalidation
+        pub fn add_dependency(&mut self, node_id: NodeId, depends_on: NodeId) {
+            self.dependency_graph
+                .entry(depends_on)
+                .or_insert_with(HashSet::new)
+                .insert(node_id);
+        }
+
+        /// Update relationship fingerprint for a node
+        pub fn update_fingerprint(
+            &mut self,
+            node_id: NodeId,
+            fingerprint: RelationshipFingerprint,
+        ) {
+            self.relationship_fingerprints.insert(node_id, fingerprint);
+        }
+
+        /// Invalidate embeddings when a node changes
+        pub fn invalidate_node_embeddings(&mut self, node_id: &NodeId) {
+            self.metrics.invalidations += 1;
+
+            // Get all nodes that depend on this node
+            let dependents = self
+                .dependency_graph
+                .get(node_id)
+                .cloned()
+                .unwrap_or_default();
+
+            // Invalidate contextual and hierarchical caches for dependents
+            self.invalidate_contextual_caches(&dependents);
+            self.invalidate_hierarchical_caches(&dependents);
+
+            // Update fingerprint timestamp for the changed node
+            if let Some(fingerprint) = self.relationship_fingerprints.get_mut(node_id) {
+                fingerprint.last_modified = Utc::now();
+            }
+
+            // Recursively invalidate dependent nodes
+            for dependent in dependents {
+                self.invalidate_node_embeddings(&dependent);
+            }
+        }
+
+        /// Clear all caches
+        pub fn clear_all(&mut self) {
+            self.individual_cache.clear();
+            self.contextual_cache.clear();
+            self.hierarchical_cache.clear();
+            self.dependency_graph.clear();
+            self.relationship_fingerprints.clear();
+            self.metrics.reset();
+        }
+
+        /// Get cache metrics
+        pub fn metrics(&self) -> &CacheMetrics {
+            &self.metrics
+        }
+
+        /// Get cache statistics
+        pub fn cache_stats(&self) -> CacheStats {
+            CacheStats {
+                individual_count: self.individual_cache.len(),
+                individual_capacity: self.individual_cache.capacity(),
+                contextual_count: self.contextual_cache.len(),
+                contextual_capacity: self.contextual_cache.capacity(),
+                hierarchical_count: self.hierarchical_cache.len(),
+                hierarchical_capacity: self.hierarchical_cache.capacity(),
+                dependency_count: self.dependency_graph.len(),
+                memory_usage_bytes: self.metrics.memory_usage_bytes,
+                overall_hit_rate: self.metrics.overall_hit_rate(),
+            }
+        }
+
+        // Private helper methods
+
+        fn is_contextual_entry_valid(&self, entry: &CacheEntry) -> bool {
+            // Check if entry has expired
+            if entry.created_at.elapsed() > self.cache_ttl {
+                return false;
+            }
+
+            // Check if relationships have changed
+            if let Some(fingerprint) = &entry.fingerprint {
+                // Compare with current fingerprint
+                if let Some(current_fingerprint) =
+                    self.relationship_fingerprints.get(&NodeId::new())
+                {
+                    return fingerprint.last_modified <= current_fingerprint.last_modified;
+                }
+            }
+
+            true
+        }
+
+        fn is_hierarchical_entry_valid(&self, entry: &CacheEntry) -> bool {
+            // Check if entry has expired
+            if entry.created_at.elapsed() > self.cache_ttl {
+                return false;
+            }
+
+            // Hierarchical embeddings are more sensitive to changes
+            if let Some(fingerprint) = &entry.fingerprint {
+                // Any parent or sibling change invalidates hierarchical embeddings
+                if let Some(current_fingerprint) =
+                    self.relationship_fingerprints.get(&NodeId::new())
+                {
+                    return fingerprint.parent_id == current_fingerprint.parent_id
+                        && fingerprint.sibling_ids == current_fingerprint.sibling_ids;
+                }
+            }
+
+            true
+        }
+
+        fn invalidate_contextual_caches(&mut self, node_ids: &HashSet<NodeId>) {
+            // Remove contextual cache entries that depend on the changed nodes
+            let keys_to_remove: Vec<ContextHash> = self
+                .contextual_cache
+                .map
+                .keys()
+                .filter(|context_hash| {
+                    // Check if any of the context hashes are affected
+                    node_ids.iter().any(|node_id| {
+                        let content_hash = ContentHash::from_content(&node_id.to_string());
+                        context_hash.parent_hash == Some(content_hash.clone())
+                            || context_hash.sibling_hashes.contains(&content_hash)
+                            || context_hash.mention_hashes.contains(&content_hash)
+                    })
+                })
+                .cloned()
+                .collect();
+
+            for key in keys_to_remove {
+                self.contextual_cache.remove(&key);
+            }
+        }
+
+        fn invalidate_hierarchical_caches(&mut self, node_ids: &HashSet<NodeId>) {
+            // Remove hierarchical cache entries that include the changed nodes in their path
+            let keys_to_remove: Vec<PathHash> = self
+                .hierarchical_cache
+                .map
+                .keys()
+                .filter(|path_hash| {
+                    // Check if any of the path hashes are affected
+                    node_ids.iter().any(|node_id| {
+                        let content_hash = ContentHash::from_content(&node_id.to_string());
+                        path_hash.path_hashes.contains(&content_hash)
+                    })
+                })
+                .cloned()
+                .collect();
+
+            for key in keys_to_remove {
+                self.hierarchical_cache.remove(&key);
+            }
+        }
+
+        fn update_memory_usage(&mut self) {
+            // Estimate memory usage (simplified calculation)
+            let individual_size = self.individual_cache.len() * 768 * 4; // Assume 768-dim f32 embeddings
+            let contextual_size = self.contextual_cache.len() * 768 * 4;
+            let hierarchical_size = self.hierarchical_cache.len() * 768 * 4;
+
+            self.metrics.memory_usage_bytes = individual_size + contextual_size + hierarchical_size;
+        }
+    }
+
+    /// Cache statistics for monitoring
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct CacheStats {
+        pub individual_count: usize,
+        pub individual_capacity: usize,
+        pub contextual_count: usize,
+        pub contextual_capacity: usize,
+        pub hierarchical_count: usize,
+        pub hierarchical_capacity: usize,
+        pub dependency_count: usize,
+        pub memory_usage_bytes: usize,
+        pub overall_hit_rate: f64,
     }
 }
 
@@ -211,16 +805,17 @@ pub enum ServiceState {
 
 /// Core business logic service that orchestrates NodeSpace functionality
 /// using distributed contract ownership
-pub struct NodeSpaceService<D: DataStore, N: NLPEngine> {
+pub struct NodeSpaceService<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> {
     data_store: D,
     nlp_engine: N,
     config: NodeSpaceConfig,
     state: Arc<RwLock<ServiceState>>,
     performance_monitor: monitoring::PerformanceMonitor,
     hierarchy_cache: Arc<RwLock<HierarchyCache>>,
+    embedding_cache: Arc<RwLock<smart_embedding_cache::SmartEmbeddingCache>>,
 }
 
-impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
+impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D, N> {
     /// Create a new NodeSpace service with injected dependencies
     pub fn new(data_store: D, nlp_engine: N) -> Self {
         Self::with_config(data_store, nlp_engine, NodeSpaceConfig::default())
@@ -235,12 +830,179 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
             state: Arc::new(RwLock::new(ServiceState::Uninitialized)),
             performance_monitor: monitoring::PerformanceMonitor::new(),
             hierarchy_cache: Arc::new(RwLock::new(HierarchyCache::new())),
+            embedding_cache: Arc::new(RwLock::new(
+                smart_embedding_cache::SmartEmbeddingCache::new(),
+            )),
         }
     }
 
     /// Get performance monitor for metrics access
     pub fn performance_monitor(&self) -> &monitoring::PerformanceMonitor {
         &self.performance_monitor
+    }
+
+    /// Get embedding cache statistics
+    pub async fn embedding_cache_stats(&self) -> smart_embedding_cache::CacheStats {
+        let cache = self.embedding_cache.read().await;
+        cache.cache_stats()
+    }
+
+    /// Clear embedding cache
+    pub async fn clear_embedding_cache(&self) {
+        let mut cache = self.embedding_cache.write().await;
+        cache.clear_all();
+    }
+
+    /// Get embedding with intelligent caching
+    pub async fn get_cached_embedding(&self, content: &str) -> NodeSpaceResult<Vec<f32>> {
+        let content_hash = smart_embedding_cache::ContentHash::from_content(content);
+
+        // Try to get from individual cache first
+        {
+            let mut cache = self.embedding_cache.write().await;
+            if let Some(cached_embedding) = cache.get_individual_embedding(&content_hash) {
+                return Ok(cached_embedding);
+            }
+        }
+
+        // Generate new embedding if not cached
+        let embedding = self.nlp_engine.generate_embedding(content).await?;
+
+        // Cache the new embedding
+        {
+            let mut cache = self.embedding_cache.write().await;
+            cache.cache_individual_embedding(content_hash, embedding.clone());
+        }
+
+        Ok(embedding)
+    }
+
+    /// Get contextual embedding with relationship tracking
+    pub async fn get_cached_contextual_embedding(
+        &self,
+        node: &Node,
+        context_strategy: smart_embedding_cache::ContextStrategy,
+    ) -> NodeSpaceResult<Vec<f32>> {
+        // Build context hash from node relationships
+        let content_hash =
+            smart_embedding_cache::ContentHash::from_content(node.content.as_str().unwrap_or(""));
+
+        let parent_hash = if let Some(parent_id) = &node.parent_id {
+            if let Ok(Some(parent_node)) = self.data_store.get_node(parent_id).await {
+                Some(smart_embedding_cache::ContentHash::from_content(
+                    parent_node.content.as_str().unwrap_or(""),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Get sibling hashes
+        let sibling_hashes = if let Some(parent_id) = &node.parent_id {
+            let siblings = self.get_children(parent_id).await.unwrap_or_default();
+            siblings
+                .iter()
+                .filter(|sibling| sibling.id != node.id)
+                .map(|sibling| {
+                    smart_embedding_cache::ContentHash::from_content(
+                        sibling.content.as_str().unwrap_or(""),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let context_hash = smart_embedding_cache::ContextHash {
+            content_hash: content_hash.clone(),
+            parent_hash,
+            sibling_hashes,
+            mention_hashes: Vec::new(), // TODO: Extract mentions
+            strategy: context_strategy,
+        };
+
+        // Try to get from contextual cache
+        {
+            let mut cache = self.embedding_cache.write().await;
+            if let Some(cached_embedding) = cache.get_contextual_embedding(&context_hash) {
+                return Ok(cached_embedding);
+            }
+        }
+
+        // Generate contextual embedding
+        let contextual_content = self.build_contextual_content(node).await?;
+        let embedding = self
+            .nlp_engine
+            .generate_embedding(&contextual_content)
+            .await?;
+
+        // Create relationship fingerprint
+        let fingerprint = smart_embedding_cache::RelationshipFingerprint {
+            parent_id: node.parent_id.clone(),
+            sibling_ids: if let Some(parent_id) = &node.parent_id {
+                self.get_children(parent_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|sibling| sibling.id != node.id)
+                    .map(|sibling| sibling.id)
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            mention_ids: Vec::new(), // TODO: Extract mentions
+            last_modified: Utc::now(),
+        };
+
+        // Cache the contextual embedding
+        {
+            let mut cache = self.embedding_cache.write().await;
+            cache.cache_contextual_embedding(context_hash, embedding.clone(), fingerprint);
+        }
+
+        Ok(embedding)
+    }
+
+    /// Invalidate cache when node changes
+    pub async fn invalidate_node_cache(&self, node_id: &NodeId) {
+        let mut cache = self.embedding_cache.write().await;
+        cache.invalidate_node_embeddings(node_id);
+    }
+
+    /// Build contextual content for embeddings
+    async fn build_contextual_content(&self, node: &Node) -> NodeSpaceResult<String> {
+        let mut contextual_parts = Vec::new();
+
+        // Add the node's own content
+        if let Some(content) = node.content.as_str() {
+            contextual_parts.push(format!("Content: {}", content));
+        }
+
+        // Add parent context
+        if let Some(parent_id) = &node.parent_id {
+            if let Ok(Some(parent_node)) = self.data_store.get_node(parent_id).await {
+                if let Some(parent_content) = parent_node.content.as_str() {
+                    contextual_parts.push(format!("Parent: {}", parent_content));
+                }
+            }
+        }
+
+        // Add sibling context (limited to avoid overwhelming)
+        if let Some(parent_id) = &node.parent_id {
+            let siblings = self.get_children(parent_id).await.unwrap_or_default();
+            let sibling_contents: Vec<String> = siblings
+                .iter()
+                .filter(|sibling| sibling.id != node.id)
+                .take(3) // Limit to 3 siblings for context
+                .filter_map(|sibling| sibling.content.as_str())
+                .map(|content| format!("Sibling: {}", content))
+                .collect();
+            contextual_parts.extend(sibling_contents);
+        }
+
+        Ok(contextual_parts.join("\n"))
     }
 }
 
@@ -310,7 +1072,7 @@ impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine
     }
 }
 
-impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
+impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D, N> {
     /// Initialize the service and load models
     pub async fn initialize(&self) -> NodeSpaceResult<()> {
         // Update state to initializing
@@ -764,6 +1526,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Use the data store's update method which handles embedding regeneration automatically
         // The LanceDB data store now detects content changes and regenerates embeddings as needed
         self.data_store.update_node(node).await?;
+
+        // Invalidate embedding cache for this node and its dependents
+        self.invalidate_node_cache(node_id).await;
 
         Ok(())
     }
