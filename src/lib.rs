@@ -217,6 +217,7 @@ pub struct NodeSpaceService<D: DataStore, N: NLPEngine> {
     config: NodeSpaceConfig,
     state: Arc<RwLock<ServiceState>>,
     performance_monitor: monitoring::PerformanceMonitor,
+    hierarchy_cache: Arc<RwLock<HierarchyCache>>,
 }
 
 impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
@@ -233,6 +234,7 @@ impl<D: DataStore, N: NLPEngine> NodeSpaceService<D, N> {
             config,
             state: Arc::new(RwLock::new(ServiceState::Uninitialized)),
             performance_monitor: monitoring::PerformanceMonitor::new(),
+            hierarchy_cache: Arc::new(RwLock::new(HierarchyCache::new())),
         }
     }
 
@@ -501,6 +503,41 @@ pub trait DateNavigation: Send + Sync {
     }
 }
 
+/// Hierarchy computation operations for runtime node relationships
+#[async_trait]
+pub trait HierarchyComputation: Send + Sync {
+    /// Compute node depth by traversing parent chain
+    async fn get_node_depth(&self, node_id: &NodeId) -> NodeSpaceResult<u32>;
+
+    /// Get direct children of a parent node
+    async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Get all ancestors of a node (parent, grandparent, etc.)
+    async fn get_ancestors(&self, node_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Get all siblings of a node (same parent)
+    async fn get_siblings(&self, node_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Move a node to a new parent (validates hierarchy constraints)
+    async fn move_node(&self, node_id: &NodeId, new_parent: &NodeId) -> NodeSpaceResult<()>;
+
+    /// Move an entire subtree to a new parent
+    async fn move_subtree(&self, root_id: &NodeId, new_parent: &NodeId) -> NodeSpaceResult<()>;
+
+    /// Get a subtree with computed depths for each node
+    async fn get_subtree_with_depths(&self, root_id: &NodeId) -> NodeSpaceResult<Vec<(Node, u32)>>;
+
+    /// Validate that a hierarchy move operation is legal (no cycles, valid targets)
+    async fn validate_hierarchy_move(
+        &self,
+        node_id: &NodeId,
+        new_parent: &NodeId,
+    ) -> NodeSpaceResult<()>;
+
+    /// Invalidate hierarchy cache (call after structural changes)
+    async fn invalidate_hierarchy_cache(&self);
+}
+
 /// Search result with relevance scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -603,6 +640,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata: Some(metadata),
             created_at: now.clone(),
             updated_at: now,
+            parent_id: None,
             next_sibling: None,
             previous_sibling: None,
         };
@@ -1001,6 +1039,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
             metadata,
             created_at: now.clone(),
             updated_at: now,
+            parent_id: None,
             next_sibling: None,
             previous_sibling: None,
         };
@@ -1105,6 +1144,282 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
     }
 }
 
+/// Hierarchy computation implementation for NodeSpaceService
+#[async_trait]
+impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputation
+    for NodeSpaceService<D, N>
+{
+    async fn get_node_depth(&self, node_id: &NodeId) -> NodeSpaceResult<u32> {
+        // Check cache first
+        {
+            let cache = self.hierarchy_cache.read().await;
+            if let Some(depth) = cache.get_depth(node_id) {
+                return Ok(depth);
+            }
+        }
+
+        // Compute depth by traversing parent chain
+        let mut depth = 0;
+        let mut current_node_id = node_id.clone();
+
+        loop {
+            // Get the current node
+            let node = self
+                .data_store
+                .get_node(&current_node_id)
+                .await?
+                .ok_or_else(|| {
+                    NodeSpaceError::NotFound(format!("Node {} not found", current_node_id))
+                })?;
+
+            // Check if this node has a parent
+            if let Some(parent_id) = &node.parent_id {
+                depth += 1;
+                current_node_id = parent_id.clone();
+
+                // Safety check to prevent infinite loops
+                if depth > 1000 {
+                    return Err(NodeSpaceError::ValidationError(
+                        "Hierarchy depth exceeds maximum limit (possible cycle)".to_string(),
+                    ));
+                }
+            } else {
+                // Reached root node
+                break;
+            }
+        }
+
+        // Cache the result
+        {
+            let mut cache = self.hierarchy_cache.write().await;
+            cache.cache_depth(node_id.clone(), depth);
+        }
+
+        Ok(depth)
+    }
+
+    async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Check cache first
+        {
+            let cache = self.hierarchy_cache.read().await;
+            if let Some(cached_child_ids) = cache.get_children(parent_id) {
+                // Load nodes from cached IDs
+                let mut children = Vec::new();
+                for child_id in cached_child_ids {
+                    if let Ok(Some(child)) = self.data_store.get_node(child_id).await {
+                        children.push(child);
+                    }
+                }
+                return Ok(children);
+            }
+        }
+
+        // Get all nodes and filter for children
+        let all_nodes = self.data_store.query_nodes("").await?;
+        let mut children = Vec::new();
+        let mut child_ids = Vec::new();
+
+        for node in all_nodes {
+            if let Some(node_parent_id) = &node.parent_id {
+                if *node_parent_id == *parent_id {
+                    child_ids.push(node.id.clone());
+                    children.push(node);
+                }
+            }
+        }
+
+        // Cache the child IDs
+        {
+            let mut cache = self.hierarchy_cache.write().await;
+            cache.cache_children(parent_id.clone(), child_ids);
+        }
+
+        Ok(children)
+    }
+
+    async fn get_ancestors(&self, node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        let mut ancestors = Vec::new();
+        let mut current_node_id = node_id.clone();
+
+        loop {
+            // Get the current node
+            let node = self
+                .data_store
+                .get_node(&current_node_id)
+                .await?
+                .ok_or_else(|| {
+                    NodeSpaceError::NotFound(format!("Node {} not found", current_node_id))
+                })?;
+
+            // Check if this node has a parent
+            if let Some(parent_id) = &node.parent_id {
+                // Get the parent node
+                let parent_node = self.data_store.get_node(parent_id).await?.ok_or_else(|| {
+                    NodeSpaceError::NotFound(format!("Parent node {} not found", parent_id))
+                })?;
+
+                ancestors.push(parent_node);
+                current_node_id = parent_id.clone();
+
+                // Safety check to prevent infinite loops
+                if ancestors.len() > 1000 {
+                    return Err(NodeSpaceError::ValidationError(
+                        "Ancestry chain exceeds maximum limit (possible cycle)".to_string(),
+                    ));
+                }
+            } else {
+                // Reached root node
+                break;
+            }
+        }
+
+        Ok(ancestors)
+    }
+
+    async fn get_siblings(&self, node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Get the node to find its parent
+        let node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        // If node has no parent, it has no siblings
+        let parent_id = match &node.parent_id {
+            Some(parent_id) => parent_id.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        // Get all children of the parent, excluding the original node
+        let all_children = self.get_children(&parent_id).await?;
+        let siblings: Vec<Node> = all_children
+            .into_iter()
+            .filter(|child| child.id != *node_id)
+            .collect();
+
+        Ok(siblings)
+    }
+
+    async fn move_node(&self, node_id: &NodeId, new_parent: &NodeId) -> NodeSpaceResult<()> {
+        // Validate the move is legal
+        self.validate_hierarchy_move(node_id, new_parent).await?;
+
+        // Get the node to move
+        let mut node = self
+            .data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        // Update the node's parent_id directly
+        node.parent_id = Some(new_parent.clone());
+        node.updated_at = chrono::Utc::now().to_rfc3339();
+
+        // Save the updated node
+        self.data_store.update_node(node).await?;
+
+        // Invalidate cache since hierarchy changed
+        self.invalidate_hierarchy_cache().await;
+
+        Ok(())
+    }
+
+    async fn move_subtree(&self, root_id: &NodeId, new_parent: &NodeId) -> NodeSpaceResult<()> {
+        // Validate the move is legal for the root
+        self.validate_hierarchy_move(root_id, new_parent).await?;
+
+        // Get all descendants of the subtree
+        let all_nodes = self.data_store.query_nodes("").await?;
+        let descendants = get_all_descendants(&all_nodes, root_id);
+
+        // Validate each descendant won't create cycles
+        for descendant in &descendants {
+            if descendant.id == *new_parent {
+                return Err(NodeSpaceError::ValidationError(
+                    "Cannot move subtree: would create a cycle".to_string(),
+                ));
+            }
+        }
+
+        // Move the root node
+        self.move_node(root_id, new_parent).await?;
+
+        Ok(())
+    }
+
+    async fn get_subtree_with_depths(&self, root_id: &NodeId) -> NodeSpaceResult<Vec<(Node, u32)>> {
+        let mut result = Vec::new();
+
+        // Get the root node and its depth
+        let root_node =
+            self.data_store.get_node(root_id).await?.ok_or_else(|| {
+                NodeSpaceError::NotFound(format!("Root node {} not found", root_id))
+            })?;
+        let root_depth = self.get_node_depth(root_id).await?;
+        result.push((root_node, root_depth));
+
+        // Get all descendants
+        let all_nodes = self.data_store.query_nodes("").await?;
+        let descendants = get_all_descendants(&all_nodes, root_id);
+
+        // Compute depth for each descendant
+        for descendant in descendants {
+            let depth = self.get_node_depth(&descendant.id).await?;
+            result.push((descendant, depth));
+        }
+
+        // Sort by depth for consistent ordering
+        result.sort_by(|a, b| a.1.cmp(&b.1));
+
+        Ok(result)
+    }
+
+    async fn validate_hierarchy_move(
+        &self,
+        node_id: &NodeId,
+        new_parent: &NodeId,
+    ) -> NodeSpaceResult<()> {
+        // Check if node exists
+        self.data_store
+            .get_node(node_id)
+            .await?
+            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+
+        // Check if new parent exists
+        self.data_store.get_node(new_parent).await?.ok_or_else(|| {
+            NodeSpaceError::NotFound(format!("New parent {} not found", new_parent))
+        })?;
+
+        // Check if moving to self (invalid)
+        if node_id == new_parent {
+            return Err(NodeSpaceError::ValidationError(
+                "Cannot move node to itself".to_string(),
+            ));
+        }
+
+        // Check if new parent is a descendant of the node (would create cycle)
+        let descendants = {
+            let all_nodes = self.data_store.query_nodes("").await?;
+            get_all_descendants(&all_nodes, node_id)
+        };
+
+        for descendant in descendants {
+            if descendant.id == *new_parent {
+                return Err(NodeSpaceError::ValidationError(
+                    "Cannot move node: new parent is a descendant (would create cycle)".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn invalidate_hierarchy_cache(&self) {
+        let mut cache = self.hierarchy_cache.write().await;
+        cache.invalidate();
+    }
+}
+
 /// Helper function to get all descendants (children, grandchildren, etc.) of a node
 fn get_all_descendants(all_nodes: &[Node], parent_id: &NodeId) -> Vec<Node> {
     let mut descendants = Vec::new();
@@ -1113,21 +1428,77 @@ fn get_all_descendants(all_nodes: &[Node], parent_id: &NodeId) -> Vec<Node> {
     while let Some(current_parent_id) = to_process.pop() {
         // Find direct children of current parent
         for node in all_nodes {
-            if let Some(metadata) = &node.metadata {
-                if let Some(node_parent_id) = metadata.get("parent_id") {
-                    if let Some(node_parent_str) = node_parent_id.as_str() {
-                        if node_parent_str == current_parent_id.to_string() {
-                            // This is a child - add it to results and queue for processing
-                            descendants.push(node.clone());
-                            to_process.push(node.id.clone());
-                        }
-                    }
+            if let Some(node_parent_id) = &node.parent_id {
+                if *node_parent_id == current_parent_id {
+                    // This is a child - add it to results and queue for processing
+                    descendants.push(node.clone());
+                    to_process.push(node.id.clone());
                 }
             }
         }
     }
 
     descendants
+}
+
+/// Smart caching for hierarchy operations
+#[derive(Debug, Default)]
+pub struct HierarchyCache {
+    depth_cache: std::collections::HashMap<NodeId, u32>,
+    children_cache: std::collections::HashMap<NodeId, Vec<NodeId>>,
+    last_updated: Option<std::time::Instant>,
+    cache_ttl: std::time::Duration,
+}
+
+impl HierarchyCache {
+    pub fn new() -> Self {
+        Self {
+            depth_cache: std::collections::HashMap::new(),
+            children_cache: std::collections::HashMap::new(),
+            last_updated: None,
+            cache_ttl: std::time::Duration::from_secs(300), // 5 minute TTL
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        if let Some(last_updated) = self.last_updated {
+            last_updated.elapsed() > self.cache_ttl
+        } else {
+            true
+        }
+    }
+
+    pub fn invalidate(&mut self) {
+        self.depth_cache.clear();
+        self.children_cache.clear();
+        self.last_updated = None;
+    }
+
+    pub fn get_depth(&self, node_id: &NodeId) -> Option<u32> {
+        if self.is_expired() {
+            None
+        } else {
+            self.depth_cache.get(node_id).copied()
+        }
+    }
+
+    pub fn cache_depth(&mut self, node_id: NodeId, depth: u32) {
+        self.depth_cache.insert(node_id, depth);
+        self.last_updated = Some(std::time::Instant::now());
+    }
+
+    pub fn get_children(&self, parent_id: &NodeId) -> Option<&Vec<NodeId>> {
+        if self.is_expired() {
+            None
+        } else {
+            self.children_cache.get(parent_id)
+        }
+    }
+
+    pub fn cache_children(&mut self, parent_id: NodeId, children: Vec<NodeId>) {
+        self.children_cache.insert(parent_id, children);
+        self.last_updated = Some(std::time::Instant::now());
+    }
 }
 
 /// Cross-modal search orchestration implementation for NodeSpaceService
