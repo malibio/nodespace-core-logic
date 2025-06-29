@@ -1,5 +1,5 @@
 # ⚠️ BEFORE STARTING ANY WORK
-👉 **STEP 1**: Read development workflow: `../nodespace-system-design/docs/development-workflow.md`
+👉 **STEP 1**: Read development workflow: `../nodespace-system-design/docs/development/workflow.md`
 👉 **STEP 2**: Check Linear for assigned tasks
 👉 **STEP 3**: Repository-specific patterns below
 

@@ -2,7 +2,7 @@
 
 🚨 **STOP - READ WORKFLOW FIRST** 🚨
 Before doing ANYTHING else, you MUST read the development workflow:
-1. Read: `../nodespace-system-design/docs/development-workflow.md`
+1. Read: `../nodespace-system-design/docs/development/workflow.md`
 2. Check Linear for current tasks
 3. Then return here for implementation guidance
 
@@ -25,14 +25,14 @@ This is the **business logic orchestration layer** for NodeSpace - a Rust-based 
 
 ## 🎯 FINDING YOUR NEXT TASK
 
-**See [development-workflow.md](../nodespace-system-design/docs/development-workflow.md)** for task management workflow.
+**See [development/workflow.md](../nodespace-system-design/docs/development/workflow.md)** for task management workflow.
 
 ## Essential Onboarding Process
 
 **Follow the README.md onboarding steps exactly**:
 
 1. **Read [NodeSpace System Design](../nodespace-system-design/README.md)** - Understand the full architecture
-2. **Review [Development Workflow](../nodespace-system-design/docs/development-workflow.md)** - Process and procedures
+2. **Review [Development Workflow](../nodespace-system-design/docs/development/workflow.md)** - Process and procedures
 3. **Study [Key Contracts](../nodespace-system-design/contracts/)** - Interface definitions to implement
 4. **See [MVP User Flow](../nodespace-system-design/examples/mvp-user-flow.md)** - Implementation examples
 
