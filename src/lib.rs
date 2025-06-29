@@ -536,6 +536,16 @@ pub trait HierarchyComputation: Send + Sync {
 
     /// Invalidate hierarchy cache (call after structural changes)
     async fn invalidate_hierarchy_cache(&self);
+
+    /// Get all nodes in a tree/subtree rooted at the given node
+    async fn get_tree_nodes(&self, root_id: &NodeId) -> NodeSpaceResult<Vec<Node>>;
+
+    /// Check if one node is an ancestor of another
+    async fn is_ancestor_of(
+        &self,
+        potential_ancestor: &NodeId,
+        node_id: &NodeId,
+    ) -> NodeSpaceResult<bool>;
 }
 
 /// Search result with relevance scoring
@@ -1199,6 +1209,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
     }
 
     async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // Validate that the parent node exists
+        self.data_store.get_node(parent_id).await?.ok_or_else(|| {
+            NodeSpaceError::NotFound(format!("Parent node {} not found", parent_id))
+        })?;
+
         // Check cache first
         {
             let cache = self.hierarchy_cache.read().await;
@@ -1417,6 +1432,38 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
     async fn invalidate_hierarchy_cache(&self) {
         let mut cache = self.hierarchy_cache.write().await;
         cache.invalidate();
+    }
+
+    async fn get_tree_nodes(&self, root_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        let mut result = Vec::new();
+
+        // Get the root node
+        let root_node =
+            self.data_store.get_node(root_id).await?.ok_or_else(|| {
+                NodeSpaceError::NotFound(format!("Root node {} not found", root_id))
+            })?;
+        result.push(root_node);
+
+        // Get all descendants
+        let all_nodes = self.data_store.query_nodes("").await?;
+        let descendants = get_all_descendants(&all_nodes, root_id);
+        result.extend(descendants);
+
+        Ok(result)
+    }
+
+    async fn is_ancestor_of(
+        &self,
+        potential_ancestor: &NodeId,
+        node_id: &NodeId,
+    ) -> NodeSpaceResult<bool> {
+        // Get all ancestors of the node
+        let ancestors = self.get_ancestors(node_id).await?;
+
+        // Check if the potential ancestor is in the list
+        Ok(ancestors
+            .iter()
+            .any(|ancestor| ancestor.id == *potential_ancestor))
     }
 }
 
