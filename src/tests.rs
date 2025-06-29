@@ -2,13 +2,15 @@
 mod tests {
     use super::*;
     use crate::{
-        constants, CoreLogic, DateNavigation, NodeSpaceConfig, NodeSpaceService, OfflineFallback,
-        ServiceState,
+        constants, CoreLogic, DateNavigation, HierarchyComputation, NodeSpaceConfig,
+        NodeSpaceService, OfflineFallback, ServiceState,
     };
     use async_trait::async_trait;
     use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
     use nodespace_data_store::{
-        DataStore, HybridSearchConfig, ImageNode, NodeType, SearchResult as DataStoreSearchResult,
+        DataStore, HybridSearchConfig as DataStoreHybridSearchConfig,
+        ImageNode as DataStoreImageNode, NodeType as DataStoreNodeType,
+        SearchResult as DataStoreSearchResult,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -16,14 +18,14 @@ mod tests {
 
     /// Mock types for testing
     #[derive(Debug, Clone)]
-    pub struct ImageNode {
+    pub struct MockImageNode {
         pub id: String,
         pub image_data: Vec<u8>,
         pub embedding: Vec<f32>,
     }
 
     #[derive(Debug, Clone)]
-    pub enum NodeType {
+    pub enum MockNodeType {
         Text,
         Image,
         Date,
@@ -31,13 +33,13 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct HybridSearchConfig {
+    pub struct MockHybridSearchConfig {
         pub max_results: usize,
         pub min_similarity_threshold: f64,
     }
 
     #[derive(Debug, Clone)]
-    pub struct DataStoreSearchResult {
+    pub struct MockDataStoreSearchResult {
         pub node: Node,
         pub score: f32,
     }
@@ -185,18 +187,21 @@ mod tests {
             Ok(results)
         }
 
-        async fn create_image_node(&self, _image_node: ImageNode) -> NodeSpaceResult<String> {
+        async fn create_image_node(
+            &self,
+            _image_node: DataStoreImageNode,
+        ) -> NodeSpaceResult<String> {
             Ok("mock_image_id".to_string())
         }
 
-        async fn get_image_node(&self, _id: &str) -> NodeSpaceResult<Option<ImageNode>> {
+        async fn get_image_node(&self, _id: &str) -> NodeSpaceResult<Option<DataStoreImageNode>> {
             Ok(None)
         }
 
         async fn search_multimodal(
             &self,
             _query_embedding: Vec<f32>,
-            _types: Vec<NodeType>,
+            _types: Vec<DataStoreNodeType>,
         ) -> NodeSpaceResult<Vec<Node>> {
             Ok(vec![])
         }
@@ -204,7 +209,7 @@ mod tests {
         async fn hybrid_multimodal_search(
             &self,
             _query_embedding: Vec<f32>,
-            _config: &HybridSearchConfig,
+            _config: &DataStoreHybridSearchConfig,
         ) -> NodeSpaceResult<Vec<DataStoreSearchResult>> {
             Ok(vec![])
         }
@@ -357,6 +362,7 @@ mod tests {
             metadata: Some(json!({"test": true})),
             created_at: now.clone(),
             updated_at: now,
+            parent_id: None,
             next_sibling: None,
             previous_sibling: None,
         }
@@ -804,5 +810,580 @@ mod tests {
         assert!(constants::MIN_SEARCH_SCORE >= 0.0 && constants::MIN_SEARCH_SCORE <= 1.0);
         assert!(constants::BASE_CONFIDENCE_WITH_CONTEXT > constants::BASE_CONFIDENCE_NO_CONTEXT);
         assert!(constants::FALLBACK_CONFIDENCE_FACTOR < 1.0);
+    }
+
+    // === HIERARCHY COMPUTATION TESTS ===
+
+    fn create_test_node_with_parent(id: &str, content: &str, parent_id: Option<NodeId>) -> Node {
+        let now = chrono::Utc::now().to_rfc3339();
+        Node {
+            id: NodeId::from_string(id.to_string()),
+            content: json!(content),
+            metadata: Some(json!({"test": true})),
+            created_at: now.clone(),
+            updated_at: now,
+            parent_id,
+            next_sibling: None,
+            previous_sibling: None,
+        }
+    }
+
+    async fn setup_hierarchy_test_data(service: &NodeSpaceService<MockDataStore, MockNLPEngine>) {
+        // Create hierarchy:
+        //   root
+        //   ├── child1
+        //   │   ├── grandchild1
+        //   │   └── grandchild2
+        //   ├── child2
+        //   └── child3
+        //       └── grandchild3
+
+        let root = create_test_node_with_parent("root", "Root content", None);
+        let child1 = create_test_node_with_parent(
+            "child1",
+            "Child 1 content",
+            Some(NodeId::from_string("root".to_string())),
+        );
+        let child2 = create_test_node_with_parent(
+            "child2",
+            "Child 2 content",
+            Some(NodeId::from_string("root".to_string())),
+        );
+        let child3 = create_test_node_with_parent(
+            "child3",
+            "Child 3 content",
+            Some(NodeId::from_string("root".to_string())),
+        );
+        let grandchild1 = create_test_node_with_parent(
+            "grandchild1",
+            "Grandchild 1 content",
+            Some(NodeId::from_string("child1".to_string())),
+        );
+        let grandchild2 = create_test_node_with_parent(
+            "grandchild2",
+            "Grandchild 2 content",
+            Some(NodeId::from_string("child1".to_string())),
+        );
+        let grandchild3 = create_test_node_with_parent(
+            "grandchild3",
+            "Grandchild 3 content",
+            Some(NodeId::from_string("child3".to_string())),
+        );
+
+        service.data_store.add_node(root);
+        service.data_store.add_node(child1);
+        service.data_store.add_node(child2);
+        service.data_store.add_node(child3);
+        service.data_store.add_node(grandchild1);
+        service.data_store.add_node(grandchild2);
+        service.data_store.add_node(grandchild3);
+    }
+
+    #[tokio::test]
+    async fn test_get_node_depth() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Test depth calculation
+        let root_depth = service
+            .get_node_depth(&NodeId::from_string("root".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(root_depth, 0, "Root node should have depth 0");
+
+        let child_depth = service
+            .get_node_depth(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(child_depth, 1, "Child node should have depth 1");
+
+        let grandchild_depth = service
+            .get_node_depth(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(grandchild_depth, 2, "Grandchild node should have depth 2");
+    }
+
+    #[tokio::test]
+    async fn test_get_node_depth_nonexistent() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let result = service
+            .get_node_depth(&NodeId::from_string("nonexistent".to_string()))
+            .await;
+        assert!(result.is_err(), "Should return error for nonexistent node");
+    }
+
+    #[tokio::test]
+    async fn test_get_children() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Test root children
+        let root_children = service
+            .get_children(&NodeId::from_string("root".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(root_children.len(), 3, "Root should have 3 children");
+
+        let child_ids: Vec<String> = root_children.iter().map(|n| n.id.to_string()).collect();
+        assert!(child_ids.contains(&"child1".to_string()));
+        assert!(child_ids.contains(&"child2".to_string()));
+        assert!(child_ids.contains(&"child3".to_string()));
+
+        // Test child1 children
+        let child1_children = service
+            .get_children(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(child1_children.len(), 2, "Child1 should have 2 children");
+
+        let grandchild_ids: Vec<String> =
+            child1_children.iter().map(|n| n.id.to_string()).collect();
+        assert!(grandchild_ids.contains(&"grandchild1".to_string()));
+        assert!(grandchild_ids.contains(&"grandchild2".to_string()));
+
+        // Test leaf node (no children)
+        let leaf_children = service
+            .get_children(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(leaf_children.len(), 0, "Leaf node should have no children");
+    }
+
+    #[tokio::test]
+    async fn test_get_ancestors() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Test grandchild ancestors
+        let ancestors = service
+            .get_ancestors(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(ancestors.len(), 2, "Grandchild should have 2 ancestors");
+
+        // Ancestors should be ordered from immediate parent to root
+        assert_eq!(
+            ancestors[0].id.to_string(),
+            "child1",
+            "First ancestor should be immediate parent"
+        );
+        assert_eq!(
+            ancestors[1].id.to_string(),
+            "root",
+            "Second ancestor should be root"
+        );
+
+        // Test child ancestors
+        let child_ancestors = service
+            .get_ancestors(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(child_ancestors.len(), 1, "Child should have 1 ancestor");
+        assert_eq!(
+            child_ancestors[0].id.to_string(),
+            "root",
+            "Child's ancestor should be root"
+        );
+
+        // Test root ancestors (should be empty)
+        let root_ancestors = service
+            .get_ancestors(&NodeId::from_string("root".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(root_ancestors.len(), 0, "Root should have no ancestors");
+    }
+
+    #[tokio::test]
+    async fn test_get_siblings() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Test siblings of child1
+        let child1_siblings = service
+            .get_siblings(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(child1_siblings.len(), 2, "Child1 should have 2 siblings");
+
+        let sibling_ids: Vec<String> = child1_siblings.iter().map(|n| n.id.to_string()).collect();
+        assert!(sibling_ids.contains(&"child2".to_string()));
+        assert!(sibling_ids.contains(&"child3".to_string()));
+        assert!(
+            !sibling_ids.contains(&"child1".to_string()),
+            "Node should not be in its own siblings list"
+        );
+
+        // Test siblings of grandchild1
+        let grandchild1_siblings = service
+            .get_siblings(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            grandchild1_siblings.len(),
+            1,
+            "Grandchild1 should have 1 sibling"
+        );
+        assert_eq!(grandchild1_siblings[0].id.to_string(), "grandchild2");
+
+        // Test root siblings (should be empty - root has no parent)
+        let root_siblings = service
+            .get_siblings(&NodeId::from_string("root".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(root_siblings.len(), 0, "Root should have no siblings");
+    }
+
+    #[tokio::test]
+    async fn test_move_node_success() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Move grandchild1 from child1 to child2
+        let result = service
+            .move_node(
+                &NodeId::from_string("grandchild1".to_string()),
+                &NodeId::from_string("child2".to_string()),
+            )
+            .await;
+        assert!(result.is_ok(), "Move operation should succeed");
+
+        // Verify the move
+        let moved_node = service
+            .data_store
+            .get_node(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            moved_node.parent_id.unwrap().to_string(),
+            "child2",
+            "Node should have new parent"
+        );
+
+        // Verify old parent no longer has the child
+        let old_parent_children = service
+            .get_children(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        let old_child_ids: Vec<String> = old_parent_children
+            .iter()
+            .map(|n| n.id.to_string())
+            .collect();
+        assert!(
+            !old_child_ids.contains(&"grandchild1".to_string()),
+            "Old parent should not have moved child"
+        );
+
+        // Verify new parent has the child
+        let new_parent_children = service
+            .get_children(&NodeId::from_string("child2".to_string()))
+            .await
+            .unwrap();
+        let new_child_ids: Vec<String> = new_parent_children
+            .iter()
+            .map(|n| n.id.to_string())
+            .collect();
+        assert!(
+            new_child_ids.contains(&"grandchild1".to_string()),
+            "New parent should have moved child"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_move_node_cycle_detection() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Try to move root under grandchild1 (would create cycle)
+        let result = service
+            .move_node(
+                &NodeId::from_string("root".to_string()),
+                &NodeId::from_string("grandchild1".to_string()),
+            )
+            .await;
+        assert!(result.is_err(), "Move operation should fail due to cycle");
+
+        match result.unwrap_err() {
+            NodeSpaceError::ValidationError(msg) => {
+                assert!(
+                    msg.contains("cycle"),
+                    "Error should mention cycle detection"
+                );
+            }
+            _ => panic!("Expected ValidationError for cycle detection"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_move_node_to_descendant() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Try to move child1 under its own descendant grandchild1
+        let result = service
+            .move_node(
+                &NodeId::from_string("child1".to_string()),
+                &NodeId::from_string("grandchild1".to_string()),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "Move operation should fail when moving to descendant"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_move_subtree() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Move entire child1 subtree under child2
+        let result = service
+            .move_subtree(
+                &NodeId::from_string("child1".to_string()),
+                &NodeId::from_string("child2".to_string()),
+            )
+            .await;
+        assert!(result.is_ok(), "Move subtree operation should succeed");
+
+        // Verify child1 moved under child2
+        let moved_node = service
+            .data_store
+            .get_node(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            moved_node.parent_id.unwrap().to_string(),
+            "child2",
+            "Subtree root should have new parent"
+        );
+
+        // Verify grandchildren still under child1
+        let grandchild1 = service
+            .data_store
+            .get_node(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            grandchild1.parent_id.unwrap().to_string(),
+            "child1",
+            "Grandchild should still be under original parent"
+        );
+
+        // Verify hierarchy structure
+        let child1_children = service
+            .get_children(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            child1_children.len(),
+            2,
+            "Child1 should still have its children after move"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tree_nodes() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Get entire tree from root
+        let tree_nodes = service
+            .get_tree_nodes(&NodeId::from_string("root".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(tree_nodes.len(), 7, "Tree should contain all 7 nodes");
+
+        // Get subtree from child1
+        let subtree_nodes = service
+            .get_tree_nodes(&NodeId::from_string("child1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            subtree_nodes.len(),
+            3,
+            "Subtree should contain child1 and its 2 children"
+        );
+
+        // Get single node tree (leaf)
+        let leaf_tree = service
+            .get_tree_nodes(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            leaf_tree.len(),
+            1,
+            "Leaf tree should contain only the node itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_ancestor_of() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Root is ancestor of all nodes
+        assert!(service
+            .is_ancestor_of(
+                &NodeId::from_string("root".to_string()),
+                &NodeId::from_string("child1".to_string())
+            )
+            .await
+            .unwrap());
+        assert!(service
+            .is_ancestor_of(
+                &NodeId::from_string("root".to_string()),
+                &NodeId::from_string("grandchild1".to_string())
+            )
+            .await
+            .unwrap());
+
+        // Child1 is ancestor of its grandchildren
+        assert!(service
+            .is_ancestor_of(
+                &NodeId::from_string("child1".to_string()),
+                &NodeId::from_string("grandchild1".to_string())
+            )
+            .await
+            .unwrap());
+
+        // Siblings are not ancestors of each other
+        assert!(!service
+            .is_ancestor_of(
+                &NodeId::from_string("child1".to_string()),
+                &NodeId::from_string("child2".to_string())
+            )
+            .await
+            .unwrap());
+
+        // Node is not ancestor of itself
+        assert!(!service
+            .is_ancestor_of(
+                &NodeId::from_string("child1".to_string()),
+                &NodeId::from_string("child1".to_string())
+            )
+            .await
+            .unwrap());
+
+        // Descendant is not ancestor of ancestor
+        assert!(!service
+            .is_ancestor_of(
+                &NodeId::from_string("grandchild1".to_string()),
+                &NodeId::from_string("child1".to_string())
+            )
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchy_cache_functionality() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // First call should populate cache
+        let depth1 = service
+            .get_node_depth(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(depth1, 2);
+
+        // Second call should use cache (same result)
+        let depth2 = service
+            .get_node_depth(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(depth2, 2);
+
+        // Verify cache has entry
+        let cache = service.hierarchy_cache.read().await;
+        assert!(cache
+            .depth_cache
+            .contains_key(&NodeId::from_string("grandchild1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_hierarchy_cache_invalidation() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        setup_hierarchy_test_data(&service).await;
+
+        // Populate cache
+        let _depth = service
+            .get_node_depth(&NodeId::from_string("grandchild1".to_string()))
+            .await
+            .unwrap();
+
+        // Verify cache has entry
+        {
+            let cache = service.hierarchy_cache.read().await;
+            assert!(cache
+                .depth_cache
+                .contains_key(&NodeId::from_string("grandchild1".to_string())));
+        }
+
+        // Move node (should invalidate cache)
+        service
+            .move_node(
+                &NodeId::from_string("grandchild1".to_string()),
+                &NodeId::from_string("child2".to_string()),
+            )
+            .await
+            .unwrap();
+
+        // Cache should be cleared after move operation
+        let cache = service.hierarchy_cache.read().await;
+        assert!(
+            cache.depth_cache.is_empty(),
+            "Cache should be cleared after move operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hierarchy_error_conditions() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let nonexistent_id = NodeId::from_string("nonexistent".to_string());
+
+        // Test operations on nonexistent nodes
+        assert!(service.get_node_depth(&nonexistent_id).await.is_err());
+        assert!(service.get_children(&nonexistent_id).await.is_err());
+        assert!(service.get_ancestors(&nonexistent_id).await.is_err());
+        assert!(service.get_siblings(&nonexistent_id).await.is_err());
+        assert!(service.get_tree_nodes(&nonexistent_id).await.is_err());
+
+        // Test move operations with nonexistent nodes
+        let existing_id = NodeId::from_string("existing".to_string());
+        let existing_node = create_test_node_with_parent("existing", "content", None);
+        service.data_store.add_node(existing_node);
+
+        assert!(service
+            .move_node(&nonexistent_id, &existing_id)
+            .await
+            .is_err());
+        assert!(service
+            .move_node(&existing_id, &nonexistent_id)
+            .await
+            .is_err());
+        assert!(service
+            .move_subtree(&nonexistent_id, &existing_id)
+            .await
+            .is_err());
     }
 }
