@@ -10,8 +10,9 @@ mod tests {
     use nodespace_data_store::{
         DataStore, HybridSearchConfig as DataStoreHybridSearchConfig,
         ImageNode as DataStoreImageNode, NodeType as DataStoreNodeType,
-        SearchResult as DataStoreSearchResult,
+        RelevanceFactors, SearchResult as DataStoreSearchResult,
     };
+    use nodespace_nlp_engine::{ContextStrategy, NodeContext, MultiLevelEmbeddings};
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -350,6 +351,77 @@ mod tests {
 
         fn embedding_dimensions(&self) -> usize {
             constants::DEFAULT_EMBEDDING_DIMENSION
+        }
+
+        // Missing multi-level embedding methods
+        async fn generate_contextual_embedding(
+            &self,
+            _node: &nodespace_core_types::Node,
+            _context: &NodeContext,
+        ) -> NodeSpaceResult<Vec<f32>> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "generate_contextual_embedding" {
+                    return Err(NodeSpaceError::ProcessingError(
+                        "Mock contextual embedding failure".to_string(),
+                    ));
+                }
+            }
+            // Mock contextual embedding - slightly different from individual
+            Ok(vec![0.2; constants::DEFAULT_EMBEDDING_DIMENSION])
+        }
+
+        async fn generate_hierarchical_embedding(
+            &self,
+            _node: &nodespace_core_types::Node,
+            _path: &[nodespace_core_types::Node],
+        ) -> NodeSpaceResult<Vec<f32>> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "generate_hierarchical_embedding" {
+                    return Err(NodeSpaceError::ProcessingError(
+                        "Mock hierarchical embedding failure".to_string(),
+                    ));
+                }
+            }
+            // Mock hierarchical embedding - different from individual and contextual
+            Ok(vec![0.3; constants::DEFAULT_EMBEDDING_DIMENSION])
+        }
+
+        async fn generate_all_embeddings(
+            &self,
+            node: &nodespace_core_types::Node,
+            context: &NodeContext,
+            path: &[nodespace_core_types::Node],
+        ) -> NodeSpaceResult<nodespace_nlp_engine::MultiLevelEmbeddings> {
+            if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
+                if failure == "generate_all_embeddings" {
+                    return Err(NodeSpaceError::ProcessingError(
+                        "Mock all embeddings failure".to_string(),
+                    ));
+                }
+            }
+
+            // Generate each type of embedding using the respective methods
+            let individual = self.generate_embedding(&node.content.to_string()).await?;
+            let contextual = self.generate_contextual_embedding(node, context).await?;
+            let hierarchical = self.generate_hierarchical_embedding(node, path).await?;
+
+            Ok(nodespace_nlp_engine::MultiLevelEmbeddings {
+                individual,
+                contextual: Some(contextual),
+                hierarchical: Some(hierarchical),
+                context_strategy: ContextStrategy::RuleBased,
+                generated_at: chrono::Utc::now(),
+                generation_metrics: nodespace_nlp_engine::EmbeddingGenerationMetrics {
+                    individual_time_ms: 10,
+                    contextual_time_ms: Some(15),
+                    hierarchical_time_ms: Some(20),
+                    total_time_ms: 45,
+                    context_length: Some(100),
+                    path_depth: Some(path.len()),
+                    cache_hits: 0,
+                    cache_misses: 1,
+                },
+            })
         }
     }
 
