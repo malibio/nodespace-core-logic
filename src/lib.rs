@@ -1200,6 +1200,12 @@ pub trait CoreLogic: Send + Sync {
     /// Get date structure with hierarchical children for a specific date
     async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure>;
 
+    /// Get hierarchical nodes for a date using indexed lookup with proper structure
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<HierarchicalNodes>;
+
     /// Search for nodes using semantic similarity
     async fn semantic_search(
         &self,
@@ -1289,7 +1295,6 @@ pub trait CrossModalSearch: Send + Sync {
         original_query: &str,
     ) -> NodeSpaceResult<Vec<SearchResult>>;
 }
-
 
 /// Hierarchy computation operations for runtime node relationships
 #[async_trait]
@@ -1406,6 +1411,25 @@ pub struct NavigationResult {
     pub nodes: Vec<Node>,
     pub has_previous: bool,
     pub has_next: bool,
+}
+
+/// Hierarchical response with properly structured data for frontend consumption
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalNodes {
+    pub date_node: Node,
+    pub children: Vec<HierarchicalNode>,
+    pub total_count: usize,
+    pub has_content: bool,
+}
+
+/// Hierarchical node with complete structure information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalNode {
+    pub node: Node,
+    pub children: Vec<HierarchicalNode>,
+    pub depth: u32,
+    pub sibling_index: u32,
+    pub parent_id: Option<NodeId>,
 }
 
 /// Structured date representation with hierarchical organization
@@ -2094,6 +2118,54 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         timer.complete_success();
         Ok(structure)
+    }
+
+    /// Get hierarchical nodes for a date using indexed lookup with proper structure
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<HierarchicalNodes> {
+        let timer = self
+            .performance_monitor
+            .start_operation("get_hierarchical_nodes_for_date")
+            .with_metadata("date".to_string(), date.to_string());
+
+        // Check if date node exists first
+        if let Some(date_node_id) = self.find_date_node(date).await? {
+            // Get the date node
+            let date_node = self.data_store.get_node(&date_node_id).await?
+                .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
+                    entity_type: "date_node".to_string(), 
+                    id: date_node_id.to_string(),
+                    suggestions: vec!["create_date_node".to_string()]
+                }))?;
+
+            // Build hierarchical structure
+            let children = self.build_hierarchical_structure(&date_node_id, 0).await?;
+            let total_count = count_hierarchical_nodes(&children);
+            let has_content = !children.is_empty();
+
+            timer.complete_success();
+
+            Ok(HierarchicalNodes {
+                date_node,
+                children,
+                total_count,
+                has_content,
+            })
+        } else {
+            // No date node found - return empty hierarchical structure with placeholder date node
+            let placeholder_date_node = Node::new_date_node(date);
+            
+            timer.complete_success();
+
+            Ok(HierarchicalNodes {
+                date_node: placeholder_date_node,
+                children: vec![],
+                total_count: 0,
+                has_content: false,
+            })
+        }
     }
 }
 
@@ -3251,7 +3323,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
     }
 
     /// Build hierarchical structure with OrderedNode format
-    fn build_ordered_hierarchy<'a>(&'a self, parent_id: &'a NodeId, start_depth: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<OrderedNode>>> + Send + 'a>> {
+    fn build_ordered_hierarchy<'a>(
+        &'a self,
+        parent_id: &'a NodeId,
+        start_depth: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<OrderedNode>>> + Send + 'a>,
+    > {
         Box::pin(async move {
             // Resource bounds checking to prevent stack overflow and infinite recursion
             if start_depth > constants::MAX_HIERARCHY_DEPTH {
@@ -3292,7 +3370,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                 
                 // Recursive call with bounds checking
                 let grandchildren = self.build_ordered_hierarchy(&child.id, start_depth + 1).await?;
-                
                 ordered_children.push(OrderedNode {
                     node: child,
                     children: grandchildren,
@@ -3300,10 +3377,49 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                     sibling_index: index as u32,
                 });
             }
-            
+
             Ok(ordered_children)
         })
     }
+
+    /// Build hierarchical structure with HierarchicalNode format
+    fn build_hierarchical_structure<'a>(
+        &'a self,
+        parent_id: &'a NodeId,
+        start_depth: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<HierarchicalNode>>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let children = self.get_children(parent_id).await?;
+            let mut hierarchical_children = Vec::new();
+
+            for (index, child) in children.into_iter().enumerate() {
+                let grandchildren = self
+                    .build_hierarchical_structure(&child.id, start_depth + 1)
+                    .await?;
+
+                hierarchical_children.push(HierarchicalNode {
+                    node: child.clone(),
+                    children: grandchildren,
+                    depth: start_depth,
+                    sibling_index: index as u32,
+                    parent_id: Some(parent_id.clone()),
+                });
+            }
+
+            Ok(hierarchical_children)
+        })
+    }
+}
+
+/// Count total nodes in hierarchical structure (recursive)
+fn count_hierarchical_nodes(nodes: &[HierarchicalNode]) -> usize {
+    let mut count = nodes.len();
+    for node in nodes {
+        count += count_hierarchical_nodes(&node.children);
+    }
+    count
 }
 
 // Include tests module
