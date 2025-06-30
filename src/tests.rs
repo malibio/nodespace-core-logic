@@ -2,7 +2,7 @@
 mod tests {
     use super::*;
     use crate::{
-        constants, CoreLogic, DateNavigation, HierarchyComputation, NodeSpaceConfig,
+        constants, CoreLogic, HierarchyComputation, NodeSpaceConfig,
         NodeSpaceService, OfflineFallback, ServiceState,
     };
     use async_trait::async_trait;
