@@ -85,10 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("     ✅ Created example node: {}", example_node_id);
 
         // Create sample date node for navigation
-        let date_node = service.create_or_get_date_node(today).await?;
+        let date_node_id = service.ensure_date_node_exists(today).await?;
         println!(
             "     ✅ Created date node for today: {} ({})",
-            date_node.id, today
+            date_node_id, today
         );
 
         println!("   🎯 Database initialized with {} sample nodes", 2);

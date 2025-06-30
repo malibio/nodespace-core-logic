@@ -82,9 +82,7 @@ mod tests {
         async fn store_node(&self, node: Node) -> NodeSpaceResult<NodeId> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "store_node" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock store failure",
-                    ));
+                    return Err(NodeSpaceError::database_error("Mock store failure"));
                 }
             }
             let node_id = node.id.clone();
@@ -95,9 +93,7 @@ mod tests {
         async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "get_node" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock get failure",
-                    ));
+                    return Err(NodeSpaceError::database_error("Mock get failure"));
                 }
             }
             Ok(self.nodes.lock().unwrap().get(&id.to_string()).cloned())
@@ -106,9 +102,7 @@ mod tests {
         async fn delete_node(&self, id: &NodeId) -> NodeSpaceResult<()> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "delete_node" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock delete failure",
-                    ));
+                    return Err(NodeSpaceError::database_error("Mock delete failure"));
                 }
             }
             self.nodes.lock().unwrap().remove(&id.to_string());
@@ -118,9 +112,7 @@ mod tests {
         async fn query_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "query_nodes" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock query failure",
-                    ));
+                    return Err(NodeSpaceError::database_error("Mock query failure"));
                 }
             }
 
@@ -360,7 +352,7 @@ mod tests {
                     return Err(NodeSpaceError::Processing(ProcessingError::model_error(
                         "test-nlp-engine",
                         "embedding",
-                        "Mock embedding failure"
+                        "Mock embedding failure",
                     )));
                 }
             }
@@ -379,7 +371,7 @@ mod tests {
                     return Err(NodeSpaceError::Processing(ProcessingError::model_error(
                         "test-nlp-engine",
                         "text-generation",
-                        "Mock text generation failure"
+                        "Mock text generation failure",
                     )));
                 }
             }
@@ -467,7 +459,7 @@ mod tests {
                     return Err(NodeSpaceError::Processing(ProcessingError::model_error(
                         "test-nlp-engine",
                         "contextual-embedding",
-                        "Mock contextual embedding failure"
+                        "Mock contextual embedding failure",
                     )));
                 }
             }
@@ -485,7 +477,7 @@ mod tests {
                     return Err(NodeSpaceError::Processing(ProcessingError::model_error(
                         "test-nlp-engine",
                         "hierarchical-embedding",
-                        "Mock hierarchical embedding failure"
+                        "Mock hierarchical embedding failure",
                     )));
                 }
             }
@@ -504,7 +496,7 @@ mod tests {
                     return Err(NodeSpaceError::Processing(ProcessingError::model_error(
                         "test-nlp-engine",
                         "all-embeddings",
-                        "Mock all embeddings failure"
+                        "Mock all embeddings failure",
                     )));
                 }
             }
@@ -611,7 +603,10 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            NodeSpaceError::InternalError { message: _, service: _ } => {}
+            NodeSpaceError::InternalError {
+                message: _,
+                service: _,
+            } => {}
             _ => panic!("Expected InternalError for service not ready"),
         }
     }
