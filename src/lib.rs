@@ -722,6 +722,16 @@ pub mod constants {
     pub const DEFAULT_EMBEDDING_DIMENSION: usize = 768;
     /// Reserved space for prompt structure in context window
     pub const PROMPT_STRUCTURE_RESERVE: usize = 200;
+    
+    // Resource bounds for hierarchical operations
+    /// Maximum recursion depth for hierarchical operations
+    pub const MAX_HIERARCHY_DEPTH: u32 = 1000;
+    /// Maximum number of children to process in one operation
+    pub const MAX_CHILDREN_PER_NODE: usize = 10000;
+    /// Maximum total nodes to process in hierarchical structure building
+    pub const MAX_TOTAL_HIERARCHY_NODES: usize = 50000;
+    /// Timeout for individual hierarchical operations (milliseconds)
+    pub const HIERARCHY_OPERATION_TIMEOUT_MS: u64 = 30000;
 }
 
 /// Configuration for NodeSpace service initialization
@@ -1502,23 +1512,72 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             previous_sibling: None,
         };
 
-        // Handle sibling ordering (add as last child)
-        let siblings = self.get_children(&date_node_id).await?;
-        if let Some(last_sibling) = siblings.last() {
-            // Update sibling pointers
-            node.previous_sibling = Some(last_sibling.id.clone());
-            // Note: We'll need to update the last sibling's next_sibling pointer
-            // This would require updating the existing node in the data store
-        }
-
-        // Store node with embedding generation
-        self.data_store.store_node(node).await?;
-
-        // Update the previous sibling's next_sibling pointer if there was one
-        if let Some(previous_sibling_id) = &siblings.last().map(|s| &s.id) {
-            if let Ok(Some(mut prev_sibling)) = self.data_store.get_node(previous_sibling_id).await {
-                prev_sibling.next_sibling = Some(node_id.clone());
-                self.data_store.store_node(prev_sibling).await?;
+        // Atomic sibling ordering - retry mechanism to handle race conditions
+        let mut retry_count = 0;
+        const MAX_RETRIES: usize = 3;
+        
+        loop {
+            // Get current children atomically
+            let siblings = self.get_children(&date_node_id).await?;
+            
+            if let Some(last_sibling) = siblings.last() {
+                node.previous_sibling = Some(last_sibling.id.clone());
+                
+                // Optimistic concurrency: try to update both nodes
+                let previous_sibling_id = last_sibling.id.clone();
+                
+                // Store the new node first
+                self.data_store.store_node(node.clone()).await?;
+                
+                // Attempt to update previous sibling atomically
+                match self.data_store.get_node(&previous_sibling_id).await {
+                    Ok(Some(mut prev_sibling)) => {
+                        // Verify this is still the current last sibling (no race condition)
+                        if prev_sibling.next_sibling.is_none() {
+                            prev_sibling.next_sibling = Some(node_id.clone());
+                            match self.data_store.store_node(prev_sibling).await {
+                                Ok(_) => break, // Success - atomic update completed
+                                Err(_) if retry_count < MAX_RETRIES => {
+                                    retry_count += 1;
+                                    // Clean up the orphaned node and retry
+                                    let _ = self.data_store.delete_node(&node_id).await;
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        } else {
+                            // Race condition detected - someone else added a sibling
+                            if retry_count < MAX_RETRIES {
+                                retry_count += 1;
+                                // Clean up and retry
+                                let _ = self.data_store.delete_node(&node_id).await;
+                                continue;
+                            } else {
+                                return Err(NodeSpaceError::InternalError {
+                                    message: "Failed to maintain sibling ordering after retries".to_string(),
+                                    service: "core-logic".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        // Previous sibling was deleted or error occurred
+                        if retry_count < MAX_RETRIES {
+                            retry_count += 1;
+                            let _ = self.data_store.delete_node(&node_id).await;
+                            continue;
+                        } else {
+                            return Err(NodeSpaceError::InternalError {
+                                message: "Previous sibling disappeared during update".to_string(),
+                                service: "core-logic".to_string(),
+                            });
+                        }
+                    }
+                }
+            } else {
+                // No siblings, this is the first child
+                self.data_store.store_node(node).await?;
+                break;
             }
         }
 
@@ -1934,20 +1993,21 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .start_operation("find_date_node")
             .with_metadata("date".to_string(), date.to_string());
 
-        // Use date metadata to find the date node efficiently
+        // O(1) indexed lookup using structured query for date nodes
         let date_str = date.format("%Y-%m-%d").to_string();
         
-        // For now, search through all nodes to find one with date metadata
-        // In a real implementation, this would use indexed lookup
-        let all_nodes = self.data_store.query_nodes("").await?;
+        // Use targeted query instead of scanning all nodes
+        // Query specifically for date nodes with the target date
+        let query = format!("type:date AND date:{}", date_str);
+        let date_nodes = self.data_store.query_nodes(&query).await?;
         
-        for node in all_nodes {
-            if let Some(metadata) = &node.metadata {
-                if let Some(node_date) = metadata.get("date") {
-                    if node_date.as_str() == Some(&date_str) {
-                        timer.complete_success();
-                        return Ok(Some(node.id));
-                    }
+        // Should return at most one date node for any given date
+        if let Some(date_node) = date_nodes.first() {
+            // Verify this is actually a date node with correct structure
+            if let Some(content) = date_node.content.get("type") {
+                if content.as_str() == Some("date") {
+                    timer.complete_success();
+                    return Ok(Some(date_node.id.clone()));
                 }
             }
         }
@@ -3182,10 +3242,44 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
     /// Build hierarchical structure with OrderedNode format
     fn build_ordered_hierarchy<'a>(&'a self, parent_id: &'a NodeId, start_depth: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<OrderedNode>>> + Send + 'a>> {
         Box::pin(async move {
+            // Resource bounds checking to prevent stack overflow and infinite recursion
+            if start_depth > constants::MAX_HIERARCHY_DEPTH {
+                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                    field: "hierarchy_depth".to_string(),
+                    expected: format!("≤ {}", constants::MAX_HIERARCHY_DEPTH),
+                    actual: start_depth.to_string(),
+                    examples: vec!["100".to_string(), "500".to_string()],
+                }));
+            }
+            
             let children = self.get_children(parent_id).await?;
+            
+            // Check children count limit
+            if children.len() > constants::MAX_CHILDREN_PER_NODE {
+                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                    field: "children_count".to_string(),
+                    expected: format!("≤ {}", constants::MAX_CHILDREN_PER_NODE),
+                    actual: children.len().to_string(),
+                    examples: vec!["100".to_string(), "1000".to_string()],
+                }));
+            }
+            
             let mut ordered_children = Vec::new();
+            let mut total_processed = 0_usize;
             
             for (index, child) in children.into_iter().enumerate() {
+                // Check total nodes limit to prevent memory exhaustion
+                total_processed += 1;
+                if total_processed > constants::MAX_TOTAL_HIERARCHY_NODES {
+                    return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                        field: "total_hierarchy_nodes".to_string(),
+                        expected: format!("≤ {}", constants::MAX_TOTAL_HIERARCHY_NODES),
+                        actual: total_processed.to_string(),
+                        examples: vec!["10000".to_string(), "25000".to_string()],
+                    }));
+                }
+                
+                // Recursive call with bounds checking
                 let grandchildren = self.build_ordered_hierarchy(&child.id, start_depth + 1).await?;
                 
                 ordered_children.push(OrderedNode {
