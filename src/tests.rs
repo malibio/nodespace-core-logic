@@ -421,12 +421,35 @@ mod tests {
             })
         }
 
-        async fn generate_surrealql(
+        async fn extract_structured_data(
             &self,
-            _natural_query: &str,
-            _context: &str,
+            _content: &str,
+            _schema_hint: &str,
+        ) -> NodeSpaceResult<serde_json::Value> {
+            Ok(serde_json::json!({"mock": "data"}))
+        }
+
+        async fn generate_summary(
+            &self,
+            _content: &str,
+            _max_length: Option<usize>,
         ) -> NodeSpaceResult<String> {
-            Ok("SELECT * FROM mock;".to_string())
+            Ok("Mock summary".to_string())
+        }
+
+        async fn analyze_content(
+            &self,
+            _content: &str,
+            _analysis_type: &str,
+        ) -> NodeSpaceResult<nodespace_nlp_engine::ContentAnalysis> {
+            Ok(nodespace_nlp_engine::ContentAnalysis {
+                classification: "text".to_string(),
+                confidence: 0.95,
+                topics: vec!["mock".to_string()],
+                entities: vec![],
+                sentiment: Some("neutral".to_string()),
+                processing_time_ms: 10,
+            })
         }
 
         fn embedding_dimensions(&self) -> usize {
