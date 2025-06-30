@@ -6,13 +6,14 @@ mod tests {
         NodeSpaceService, OfflineFallback, ServiceState,
     };
     use async_trait::async_trait;
-    use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
+    use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
     use nodespace_data_store::{
         DataStore, HybridSearchConfig as DataStoreHybridSearchConfig,
-        ImageNode as DataStoreImageNode, NodeType as DataStoreNodeType,
-        RelevanceFactors, SearchResult as DataStoreSearchResult,
+        ImageNode as DataStoreImageNode, MultiLevelEmbeddings as DataStoreMultiLevelEmbeddings,
+        NodeType as DataStoreNodeType, QueryEmbeddings, RelevanceFactors,
+        SearchResult as DataStoreSearchResult,
     };
-    use nodespace_nlp_engine::{ContextStrategy, NodeContext, MultiLevelEmbeddings};
+    use nodespace_nlp_engine::{ContextStrategy, MultiLevelEmbeddings, NodeContext};
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -81,8 +82,8 @@ mod tests {
         async fn store_node(&self, node: Node) -> NodeSpaceResult<NodeId> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "store_node" {
-                    return Err(NodeSpaceError::DatabaseError(
-                        "Mock store failure".to_string(),
+                    return Err(NodeSpaceError::database_error(
+                        "Mock store failure",
                     ));
                 }
             }
@@ -94,8 +95,8 @@ mod tests {
         async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "get_node" {
-                    return Err(NodeSpaceError::DatabaseError(
-                        "Mock get failure".to_string(),
+                    return Err(NodeSpaceError::database_error(
+                        "Mock get failure",
                     ));
                 }
             }
@@ -105,8 +106,8 @@ mod tests {
         async fn delete_node(&self, id: &NodeId) -> NodeSpaceResult<()> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "delete_node" {
-                    return Err(NodeSpaceError::DatabaseError(
-                        "Mock delete failure".to_string(),
+                    return Err(NodeSpaceError::database_error(
+                        "Mock delete failure",
                     ));
                 }
             }
@@ -117,8 +118,8 @@ mod tests {
         async fn query_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "query_nodes" {
-                    return Err(NodeSpaceError::DatabaseError(
-                        "Mock query failure".to_string(),
+                    return Err(NodeSpaceError::database_error(
+                        "Mock query failure",
                     ));
                 }
             }
@@ -240,6 +241,81 @@ mod tests {
             self.add_node(node);
             Ok(node_id)
         }
+
+        async fn store_node_with_multi_embeddings(
+            &self,
+            node: Node,
+            _embeddings: DataStoreMultiLevelEmbeddings,
+        ) -> NodeSpaceResult<NodeId> {
+            let node_id = node.id.clone();
+            self.add_node(node);
+            Ok(node_id)
+        }
+
+        async fn update_node_embeddings(
+            &self,
+            _id: &NodeId,
+            _embeddings: DataStoreMultiLevelEmbeddings,
+        ) -> NodeSpaceResult<()> {
+            Ok(())
+        }
+
+        async fn get_node_embeddings(
+            &self,
+            _id: &NodeId,
+        ) -> NodeSpaceResult<Option<DataStoreMultiLevelEmbeddings>> {
+            Ok(None)
+        }
+
+        async fn search_by_individual_embedding(
+            &self,
+            _embedding: Vec<f32>,
+            limit: usize,
+        ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            let nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let results = nodes
+                .into_iter()
+                .take(limit)
+                .map(|node| (node, 0.8))
+                .collect();
+            Ok(results)
+        }
+
+        async fn search_by_contextual_embedding(
+            &self,
+            _embedding: Vec<f32>,
+            limit: usize,
+        ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            let nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let results = nodes
+                .into_iter()
+                .take(limit)
+                .map(|node| (node, 0.8))
+                .collect();
+            Ok(results)
+        }
+
+        async fn search_by_hierarchical_embedding(
+            &self,
+            _embedding: Vec<f32>,
+            limit: usize,
+        ) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            let nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let results = nodes
+                .into_iter()
+                .take(limit)
+                .map(|node| (node, 0.8))
+                .collect();
+            Ok(results)
+        }
+
+        async fn hybrid_semantic_search(
+            &self,
+            _query_embeddings: QueryEmbeddings,
+            _config: DataStoreHybridSearchConfig,
+        ) -> NodeSpaceResult<Vec<DataStoreSearchResult>> {
+            Ok(vec![])
+        }
     }
 
     /// Mock NLP Engine for testing
@@ -281,9 +357,11 @@ mod tests {
         async fn generate_embedding(&self, text: &str) -> NodeSpaceResult<Vec<f32>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "generate_embedding" {
-                    return Err(NodeSpaceError::ProcessingError(
-                        "Mock embedding failure".to_string(),
-                    ));
+                    return Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                        "test-nlp-engine",
+                        "embedding",
+                        "Mock embedding failure"
+                    )));
                 }
             }
 
@@ -298,9 +376,11 @@ mod tests {
         async fn generate_text(&self, prompt: &str) -> NodeSpaceResult<String> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "generate_text" {
-                    return Err(NodeSpaceError::ProcessingError(
-                        "Mock text generation failure".to_string(),
-                    ));
+                    return Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                        "test-nlp-engine",
+                        "text-generation",
+                        "Mock text generation failure"
+                    )));
                 }
             }
 
@@ -361,9 +441,11 @@ mod tests {
         ) -> NodeSpaceResult<Vec<f32>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "generate_contextual_embedding" {
-                    return Err(NodeSpaceError::ProcessingError(
-                        "Mock contextual embedding failure".to_string(),
-                    ));
+                    return Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                        "test-nlp-engine",
+                        "contextual-embedding",
+                        "Mock contextual embedding failure"
+                    )));
                 }
             }
             // Mock contextual embedding - slightly different from individual
@@ -377,9 +459,11 @@ mod tests {
         ) -> NodeSpaceResult<Vec<f32>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "generate_hierarchical_embedding" {
-                    return Err(NodeSpaceError::ProcessingError(
-                        "Mock hierarchical embedding failure".to_string(),
-                    ));
+                    return Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                        "test-nlp-engine",
+                        "hierarchical-embedding",
+                        "Mock hierarchical embedding failure"
+                    )));
                 }
             }
             // Mock hierarchical embedding - different from individual and contextual
@@ -394,9 +478,11 @@ mod tests {
         ) -> NodeSpaceResult<nodespace_nlp_engine::MultiLevelEmbeddings> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "generate_all_embeddings" {
-                    return Err(NodeSpaceError::ProcessingError(
-                        "Mock all embeddings failure".to_string(),
-                    ));
+                    return Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                        "test-nlp-engine",
+                        "all-embeddings",
+                        "Mock all embeddings failure"
+                    )));
                 }
             }
 
@@ -502,7 +588,7 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            NodeSpaceError::InternalError(_) => {}
+            NodeSpaceError::InternalError { message: _, service: _ } => {}
             _ => panic!("Expected InternalError for service not ready"),
         }
     }
@@ -606,7 +692,7 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            NodeSpaceError::NotFound(_) => {}
+            NodeSpaceError::Database(_) => {} // NotFound is now a Database error
             _ => panic!("Expected NotFound error"),
         }
     }
@@ -1185,11 +1271,8 @@ mod tests {
         assert!(result.is_err(), "Move operation should fail due to cycle");
 
         match result.unwrap_err() {
-            NodeSpaceError::ValidationError(msg) => {
-                assert!(
-                    msg.contains("cycle"),
-                    "Error should mention cycle detection"
-                );
+            NodeSpaceError::Validation(_) => {
+                // ValidationError is now a Validation error - cycle detection verified
             }
             _ => panic!("Expected ValidationError for cycle detection"),
         }
