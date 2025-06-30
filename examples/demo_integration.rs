@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use nodespace_core_logic::{CoreLogic, NodeSpaceService};
+use nodespace_core_logic::{CoreLogic, LegacyCoreLogic, NodeSpaceService};
 use nodespace_data_store::LanceDataStore;
 use nodespace_nlp_engine::LocalNLPEngine;
 use serde_json::json;

@@ -1,19 +1,18 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         constants, CoreLogic, HierarchyComputation, NodeSpaceConfig,
         NodeSpaceService, OfflineFallback, ServiceState,
     };
     use async_trait::async_trait;
-    use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
+    use nodespace_core_types::{DatabaseError, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
     use nodespace_data_store::{
         DataStore, HybridSearchConfig as DataStoreHybridSearchConfig,
         ImageNode as DataStoreImageNode, MultiLevelEmbeddings as DataStoreMultiLevelEmbeddings,
-        NodeType as DataStoreNodeType, QueryEmbeddings, RelevanceFactors,
+        NodeType as DataStoreNodeType, QueryEmbeddings,
         SearchResult as DataStoreSearchResult,
     };
-    use nodespace_nlp_engine::{ContextStrategy, MultiLevelEmbeddings, NodeContext};
+    use nodespace_nlp_engine::{ContextStrategy, NodeContext};
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -82,9 +81,11 @@ mod tests {
         async fn store_node(&self, node: Node) -> NodeSpaceResult<NodeId> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "store_node" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock store failure",
-                    ));
+                    return Err(NodeSpaceError::Database(DatabaseError::TransactionFailed {
+                        operation: "store_node".to_string(),
+                        reason: "Mock store failure".to_string(),
+                        can_retry: false,
+                    }));
                 }
             }
             let node_id = node.id.clone();
@@ -95,9 +96,11 @@ mod tests {
         async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "get_node" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock get failure",
-                    ));
+                    return Err(NodeSpaceError::Database(DatabaseError::TransactionFailed {
+                        operation: "get_node".to_string(),
+                        reason: "Mock get failure".to_string(),
+                        can_retry: false,
+                    }));
                 }
             }
             Ok(self.nodes.lock().unwrap().get(&id.to_string()).cloned())
@@ -106,9 +109,11 @@ mod tests {
         async fn delete_node(&self, id: &NodeId) -> NodeSpaceResult<()> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "delete_node" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock delete failure",
-                    ));
+                    return Err(NodeSpaceError::Database(DatabaseError::TransactionFailed {
+                        operation: "delete_node".to_string(),
+                        reason: "Mock delete failure".to_string(),
+                        can_retry: false,
+                    }));
                 }
             }
             self.nodes.lock().unwrap().remove(&id.to_string());
@@ -118,9 +123,11 @@ mod tests {
         async fn query_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>> {
             if let Some(ref failure) = *self.failure_mode.lock().unwrap() {
                 if failure == "query_nodes" {
-                    return Err(NodeSpaceError::database_error(
-                        "Mock query failure",
-                    ));
+                    return Err(NodeSpaceError::Database(DatabaseError::TransactionFailed {
+                        operation: "query_nodes".to_string(),
+                        reason: "Mock query failure".to_string(),
+                        can_retry: false,
+                    }));
                 }
             }
 
@@ -421,12 +428,40 @@ mod tests {
             })
         }
 
-        async fn generate_surrealql(
+        async fn generate_summary(
             &self,
-            _natural_query: &str,
-            _context: &str,
+            content: &str,
+            max_length: Option<usize>,
         ) -> NodeSpaceResult<String> {
-            Ok("SELECT * FROM mock;".to_string())
+            let summary = if let Some(max_len) = max_length {
+                content.chars().take(max_len).collect()
+            } else {
+                format!("Summary of: {}", content.chars().take(50).collect::<String>())
+            };
+            Ok(summary)
+        }
+
+        async fn extract_structured_data(
+            &self,
+            _content: &str,
+            _schema: &str,
+        ) -> NodeSpaceResult<serde_json::Value> {
+            Ok(serde_json::json!({"mock": "structured_data"}))
+        }
+
+        async fn analyze_content(
+            &self,
+            _content: &str,
+            _analysis_type: &str,
+        ) -> NodeSpaceResult<nodespace_nlp_engine::ContentAnalysis> {
+            Ok(nodespace_nlp_engine::ContentAnalysis {
+                classification: "mock".to_string(),
+                confidence: 0.8,
+                topics: vec!["mock".to_string()],
+                sentiment: Some("neutral".to_string()),
+                entities: vec![],
+                processing_time_ms: 100,
+            })
         }
 
         fn embedding_dimensions(&self) -> usize {

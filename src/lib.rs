@@ -457,7 +457,7 @@ pub mod smart_embedding_cache {
         pub fn add_dependency(&mut self, node_id: NodeId, depends_on: NodeId) {
             self.dependency_graph
                 .entry(depends_on)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
         }
 
