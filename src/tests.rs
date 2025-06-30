@@ -74,6 +74,81 @@ mod tests {
                 .unwrap()
                 .insert(query.to_string(), nodes);
         }
+        
+        /// Enhanced query matching for structured queries like "type:date AND date:2024-01-15"
+        fn matches_query(&self, node: &Node, query: &str) -> bool {
+            // Handle empty query (return all nodes)
+            if query.is_empty() {
+                return true;
+            }
+            
+            // Parse structured queries with AND operators
+            if query.contains(" AND ") {
+                let conditions: Vec<&str> = query.split(" AND ").collect();
+                return conditions.iter().all(|condition| self.matches_single_condition(node, condition));
+            }
+            
+            // Single condition
+            self.matches_single_condition(node, query)
+        }
+        
+        /// Match a single query condition like "type:date" or "date:2024-01-15"
+        fn matches_single_condition(&self, node: &Node, condition: &str) -> bool {
+            let condition = condition.trim();
+            
+            // Handle field:value queries
+            if let Some(colon_pos) = condition.find(':') {
+                let field = &condition[..colon_pos];
+                let value = &condition[colon_pos + 1..];
+                
+                match field {
+                    "type" => {
+                        // Check node.content.type field
+                        if let Some(node_type) = node.content.get("type") {
+                            return node_type.as_str() == Some(value);
+                        }
+                        // Also check metadata.node_type for backward compatibility
+                        if let Some(metadata) = &node.metadata {
+                            if let Some(node_type) = metadata.get("node_type") {
+                                return node_type.as_str() == Some(value);
+                            }
+                        }
+                        false
+                    }
+                    "date" => {
+                        // Check node.metadata.date field for date nodes
+                        if let Some(metadata) = &node.metadata {
+                            if let Some(date_value) = metadata.get("date") {
+                                return date_value.as_str() == Some(value);
+                            }
+                        }
+                        // Also check content.date_metadata.iso_date for date nodes
+                        if let Some(date_metadata) = node.content.get("date_metadata") {
+                            if let Some(iso_date) = date_metadata.get("iso_date") {
+                                return iso_date.as_str() == Some(value);
+                            }
+                        }
+                        false
+                    }
+                    _ => {
+                        // Generic metadata field search
+                        if let Some(metadata) = &node.metadata {
+                            if let Some(field_value) = metadata.get(field) {
+                                return field_value.as_str() == Some(value);
+                            }
+                        }
+                        false
+                    }
+                }
+            } else {
+                // Fallback: simple content search for backward compatibility
+                if let Some(content) = node.content.as_str() {
+                    content.to_lowercase().contains(&condition.to_lowercase())
+                } else {
+                    false
+                }
+            }
+        }
     }
 
     #[async_trait]
@@ -135,17 +210,11 @@ mod tests {
                 return Ok(response.clone());
             }
 
-            // Default behavior: search by content
+            // Enhanced structured query parsing for indexed lookups
             let nodes = self.nodes.lock().unwrap();
             let results: Vec<Node> = nodes
                 .values()
-                .filter(|node| {
-                    if let Some(content) = node.content.as_str() {
-                        content.to_lowercase().contains(&query.to_lowercase())
-                    } else {
-                        false
-                    }
-                })
+                .filter(|node| self.matches_query(node, query))
                 .cloned()
                 .collect();
             Ok(results)
@@ -1130,6 +1199,38 @@ mod tests {
         // Find it
         let found_id = service.find_date_node(today).await.unwrap().unwrap();
         assert_eq!(found_id, date_node_id);
+    }
+    
+    #[tokio::test]
+    async fn test_mock_query_debugging() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+        
+        let today = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        
+        // Create a date node manually and check if we can find it
+        let date_node_id = service.ensure_date_node_exists(today).await.unwrap();
+        println!("Created date node: {}", date_node_id);
+        
+        // Check what the date node looks like
+        let created_node = service.data_store.get_node(&date_node_id).await.unwrap().unwrap();
+        println!("Date node content: {:?}", created_node.content);
+        println!("Date node metadata: {:?}", created_node.metadata);
+        
+        // Try to find it with our query
+        let query = format!("type:date AND date:{}", today.format("%Y-%m-%d"));
+        println!("Query: {}", query);
+        let found_nodes = service.data_store.query_nodes(&query).await.unwrap();
+        println!("Found {} nodes with query", found_nodes.len());
+        
+        // Try basic query parts
+        let type_query = "type:date";
+        let type_results = service.data_store.query_nodes(type_query).await.unwrap();
+        println!("Found {} nodes with type:date", type_results.len());
+        
+        let date_query = format!("date:{}", today.format("%Y-%m-%d"));
+        let date_results = service.data_store.query_nodes(&date_query).await.unwrap();
+        println!("Found {} nodes with date query", date_results.len());
     }
     
     #[tokio::test]
