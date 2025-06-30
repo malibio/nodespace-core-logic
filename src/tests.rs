@@ -930,20 +930,20 @@ mod tests {
         service.initialize().await.unwrap();
 
         let today = chrono::Utc::now().date_naive();
-        let today_str = today.format("%Y-%m-%d").to_string();
 
-        // Create nodes with today's date
+        // Create a date node for today first
+        let date_node_id = service.ensure_date_node_exists(today).await.unwrap();
+
+        // Create nodes as children of the date node
         let mut node1 = create_test_node("1", "Today's content 1");
         let mut node2 = create_test_node("2", "Today's content 2");
         let mut node3 = create_test_node("3", "Child node");
 
-        // Set created_at to today
-        node1.created_at = format!("{}T10:00:00Z", today_str);
-        node2.created_at = format!("{}T11:00:00Z", today_str);
-        node3.created_at = format!("{}T12:00:00Z", today_str);
-
-        // Make node3 a child (should be filtered out)
-        node3.metadata = Some(json!({"parent_id": "1"}));
+        // Set parent relationships - node1 and node2 are children of date node
+        node1.parent_id = Some(date_node_id.clone());
+        node2.parent_id = Some(date_node_id.clone());
+        // node3 is a child of node1 (should be filtered out)
+        node3.parent_id = Some(NodeId::from_string("1".to_string()));
 
         service.data_store.add_node(node1);
         service.data_store.add_node(node2);
@@ -951,7 +951,7 @@ mod tests {
 
         let today_nodes = service.get_nodes_for_date(today).await.unwrap();
 
-        // Should return only top-level nodes (node1 and node2, not node3)
+        // Should return only direct children of date node (node1 and node2, not node3)
         assert_eq!(today_nodes.len(), 2);
 
         let node_ids: Vec<String> = today_nodes.iter().map(|n| n.id.to_string()).collect();
