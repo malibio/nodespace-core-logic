@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult};
+use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1032,10 +1032,13 @@ impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine
 
         // Initialize data store with injected database path
         let mut data_store = LanceDataStore::new(database_path).await.map_err(|e| {
-            NodeSpaceError::InternalError(format!(
-                "Failed to initialize data store at '{}': {}",
-                database_path, e
-            ))
+            NodeSpaceError::InternalError {
+                message: format!(
+                    "Failed to initialize data store at '{}': {}",
+                    database_path, e
+                ),
+                service: "core-logic".to_string(),
+            }
         })?;
 
         // Create an adapter to bridge NLP engine to data store's embedding generator interface
@@ -1397,7 +1400,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Check if service is ready
         if !self.is_ready().await {
             let state = self.get_state().await;
-            let error = NodeSpaceError::InternalError(format!("Service not ready: {:?}", state));
+            let error = NodeSpaceError::InternalError {
+                message: format!("Service not ready: {:?}", state),
+                service: "core-logic".to_string(),
+            };
             timer.complete_error(error.to_string());
             return Err(error);
         }
@@ -1432,10 +1438,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Check if service is ready
         if !self.is_ready().await {
             let state = self.get_state().await;
-            return Err(NodeSpaceError::InternalError(format!(
-                "Service not ready: {:?}",
-                state
-            )));
+            return Err(NodeSpaceError::InternalError {
+                message: format!("Service not ready: {:?}", state),
+                service: "core-logic".to_string(),
+            });
         }
 
         // Apply performance configuration limits
@@ -1475,7 +1481,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Check if service is ready
         if !self.is_ready().await {
             let state = self.get_state().await;
-            let error = NodeSpaceError::InternalError(format!("Service not ready: {:?}", state));
+            let error = NodeSpaceError::InternalError {
+                message: format!("Service not ready: {:?}", state),
+                service: "core-logic".to_string(),
+            };
             timer.complete_error(error.to_string());
             return Err(error);
         }
@@ -1517,7 +1526,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         // Update content and timestamp
         node.content = serde_json::Value::String(content.to_string());
@@ -1647,7 +1656,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         match operation {
             "indent" => {
@@ -1684,7 +1693,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                 node.previous_sibling = previous_sibling_id.cloned();
             }
             _ => {
-                return Err(NodeSpaceError::ValidationError(format!(
+                return Err(NodeSpaceError::validation_error(&format!(
                     "Unknown operation: {}",
                     operation
                 )))
@@ -1706,7 +1715,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         let mut metadata = node.metadata.unwrap_or_else(|| serde_json::json!({}));
 
@@ -1736,7 +1745,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         // Update the node's sibling pointers
         node.previous_sibling = previous_sibling_id.cloned();
@@ -1944,7 +1953,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
                 .get_node(&current_node_id)
                 .await?
                 .ok_or_else(|| {
-                    NodeSpaceError::NotFound(format!("Node {} not found", current_node_id))
+                    NodeSpaceError::not_found(&format!("Node {} not found", current_node_id))
                 })?;
 
             // Check if this node has a parent
@@ -1954,8 +1963,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
                 // Safety check to prevent infinite loops
                 if depth > 1000 {
-                    return Err(NodeSpaceError::ValidationError(
-                        "Hierarchy depth exceeds maximum limit (possible cycle)".to_string(),
+                    return Err(NodeSpaceError::validation_error(
+                        "Hierarchy depth exceeds maximum limit (possible cycle)",
                     ));
                 }
             } else {
@@ -1976,7 +1985,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
     async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
         // Validate that the parent node exists
         self.data_store.get_node(parent_id).await?.ok_or_else(|| {
-            NodeSpaceError::NotFound(format!("Parent node {} not found", parent_id))
+            NodeSpaceError::not_found(&format!("Parent node {} not found", parent_id))
         })?;
 
         // Check cache first
@@ -2028,14 +2037,14 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
                 .get_node(&current_node_id)
                 .await?
                 .ok_or_else(|| {
-                    NodeSpaceError::NotFound(format!("Node {} not found", current_node_id))
+                    NodeSpaceError::not_found(&format!("Node {} not found", current_node_id))
                 })?;
 
             // Check if this node has a parent
             if let Some(parent_id) = &node.parent_id {
                 // Get the parent node
                 let parent_node = self.data_store.get_node(parent_id).await?.ok_or_else(|| {
-                    NodeSpaceError::NotFound(format!("Parent node {} not found", parent_id))
+                    NodeSpaceError::not_found(&format!("Parent node {} not found", parent_id))
                 })?;
 
                 ancestors.push(parent_node);
@@ -2043,8 +2052,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
                 // Safety check to prevent infinite loops
                 if ancestors.len() > 1000 {
-                    return Err(NodeSpaceError::ValidationError(
-                        "Ancestry chain exceeds maximum limit (possible cycle)".to_string(),
+                    return Err(NodeSpaceError::validation_error(
+                        "Ancestry chain exceeds maximum limit (possible cycle)",
                     ));
                 }
             } else {
@@ -2062,7 +2071,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             .data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         // If node has no parent, it has no siblings
         let parent_id = match &node.parent_id {
@@ -2089,7 +2098,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             .data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         // Update the node's parent_id directly
         node.parent_id = Some(new_parent.clone());
@@ -2115,8 +2124,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         // Validate each descendant won't create cycles
         for descendant in &descendants {
             if descendant.id == *new_parent {
-                return Err(NodeSpaceError::ValidationError(
-                    "Cannot move subtree: would create a cycle".to_string(),
+                return Err(NodeSpaceError::validation_error(
+                    "Cannot move subtree: would create a cycle",
                 ));
             }
         }
@@ -2131,10 +2140,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         let mut result = Vec::new();
 
         // Get the root node and its depth
-        let root_node =
-            self.data_store.get_node(root_id).await?.ok_or_else(|| {
-                NodeSpaceError::NotFound(format!("Root node {} not found", root_id))
-            })?;
+        let root_node = self.data_store.get_node(root_id).await?.ok_or_else(|| {
+            NodeSpaceError::not_found(&format!("Root node {} not found", root_id))
+        })?;
         let root_depth = self.get_node_depth(root_id).await?;
         result.push((root_node, root_depth));
 
@@ -2163,17 +2171,17 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         self.data_store
             .get_node(node_id)
             .await?
-            .ok_or_else(|| NodeSpaceError::NotFound(format!("Node {} not found", node_id)))?;
+            .ok_or_else(|| NodeSpaceError::not_found(&format!("Node {} not found", node_id)))?;
 
         // Check if new parent exists
         self.data_store.get_node(new_parent).await?.ok_or_else(|| {
-            NodeSpaceError::NotFound(format!("New parent {} not found", new_parent))
+            NodeSpaceError::not_found(&format!("New parent {} not found", new_parent))
         })?;
 
         // Check if moving to self (invalid)
         if node_id == new_parent {
-            return Err(NodeSpaceError::ValidationError(
-                "Cannot move node to itself".to_string(),
+            return Err(NodeSpaceError::validation_error(
+                "Cannot move node to itself",
             ));
         }
 
@@ -2185,8 +2193,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
         for descendant in descendants {
             if descendant.id == *new_parent {
-                return Err(NodeSpaceError::ValidationError(
-                    "Cannot move node: new parent is a descendant (would create cycle)".to_string(),
+                return Err(NodeSpaceError::validation_error(
+                    "Cannot move node: new parent is a descendant (would create cycle)",
                 ));
             }
         }
@@ -2203,10 +2211,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         let mut result = Vec::new();
 
         // Get the root node
-        let root_node =
-            self.data_store.get_node(root_id).await?.ok_or_else(|| {
-                NodeSpaceError::NotFound(format!("Root node {} not found", root_id))
-            })?;
+        let root_node = self.data_store.get_node(root_id).await?.ok_or_else(|| {
+            NodeSpaceError::not_found(&format!("Root node {} not found", root_id))
+        })?;
         result.push(root_node);
 
         // Get all descendants
@@ -2325,10 +2332,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CrossModalSearch
         // Check if service is ready
         if !self.is_ready().await {
             let state = self.get_state().await;
-            return Err(NodeSpaceError::InternalError(format!(
-                "Service not ready: {:?}",
-                state
-            )));
+            return Err(NodeSpaceError::InternalError {
+                message: format!("Service not ready: {:?}", state),
+                service: "core-logic".to_string(),
+            });
         }
 
         // Step 1: Extract entities, temporal refs, and visual attributes
@@ -2875,9 +2882,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                 // Handle text generation failure based on configuration
                 match self.config.offline_config.offline_fallback {
                     OfflineFallback::Error => {
-                        Err(NodeSpaceError::ProcessingError(format!(
-                            "Text generation failed: {}",
-                            e
+                        Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                            "core-logic",
+                            "text-generation",
+                            &format!("Text generation failed: {}", e)
                         )))
                     }
                     OfflineFallback::Stub => {
