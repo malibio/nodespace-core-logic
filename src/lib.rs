@@ -1200,6 +1200,12 @@ pub trait CoreLogic: Send + Sync {
     /// Get date structure with hierarchical children for a specific date
     async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure>;
 
+    /// Get hierarchical nodes for a date using indexed lookup with proper structure
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<HierarchicalNodes>;
+
     /// Search for nodes using semantic similarity
     async fn semantic_search(
         &self,
@@ -2112,6 +2118,54 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         timer.complete_success();
         Ok(structure)
+    }
+
+    /// Get hierarchical nodes for a date using indexed lookup with proper structure
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<HierarchicalNodes> {
+        let timer = self
+            .performance_monitor
+            .start_operation("get_hierarchical_nodes_for_date")
+            .with_metadata("date".to_string(), date.to_string());
+
+        // Check if date node exists first
+        if let Some(date_node_id) = self.find_date_node(date).await? {
+            // Get the date node
+            let date_node = self.data_store.get_node(&date_node_id).await?
+                .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
+                    entity_type: "date_node".to_string(), 
+                    id: date_node_id.to_string(),
+                    suggestions: vec!["create_date_node".to_string()]
+                }))?;
+
+            // Build hierarchical structure
+            let children = self.build_hierarchical_structure(&date_node_id, 0).await?;
+            let total_count = count_hierarchical_nodes(&children);
+            let has_content = !children.is_empty();
+
+            timer.complete_success();
+
+            Ok(HierarchicalNodes {
+                date_node,
+                children,
+                total_count,
+                has_content,
+            })
+        } else {
+            // No date node found - return empty hierarchical structure with placeholder date node
+            let placeholder_date_node = Node::new_date_node(date);
+            
+            timer.complete_success();
+
+            Ok(HierarchicalNodes {
+                date_node: placeholder_date_node,
+                children: vec![],
+                total_count: 0,
+                has_content: false,
+            })
+        }
     }
 }
 
