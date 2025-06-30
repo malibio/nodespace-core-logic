@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use nodespace_core_types::{DateNodeMetadata, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
+use nodespace_core_types::{
+    DateNodeMetadata, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1269,7 +1271,10 @@ pub trait DateNavigation: Send + Sync {
     async fn ensure_date_node_exists(&self, date: NaiveDate) -> NodeSpaceResult<NodeId>;
 
     /// Get date structure with hierarchical children for a specific date
-    async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure>;
+    async fn get_nodes_for_date_with_structure(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<DateStructure>;
 
     /// Get today's date for navigation
     fn get_today() -> NaiveDate {
@@ -1936,7 +1941,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
     async fn find_date_node(&self, date: NaiveDate) -> NodeSpaceResult<Option<NodeId>> {
         // Query all nodes and find by schema-based date detection
         let all_nodes = self.data_store.query_nodes("").await?;
-        
+
         for node in &all_nodes {
             if node.is_date_node() {
                 if let Some(node_date) = node.get_date() {
@@ -1946,7 +1951,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
                 }
             }
         }
-        
+
         Ok(None)
     }
 
@@ -1956,30 +1961,36 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> DateNavigation
         if let Some(existing_id) = self.find_date_node(date).await? {
             return Ok(existing_id);
         }
-        
+
         // Create new date node with proper schema-based structure
         let date_node = Node::new_date_node(date);
-        
+
         // Store the node
         let node_id = self.data_store.store_node(date_node).await?;
         Ok(node_id)
     }
 
     /// Get date structure with hierarchical children for a specific date
-    async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure> {
+    async fn get_nodes_for_date_with_structure(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<DateStructure> {
         // Ensure date node exists first
         let date_node_id = self.ensure_date_node_exists(date).await?;
-        
+
         // Get the date node itself
-        let date_node = self.data_store.get_node(&date_node_id).await?
+        let date_node = self
+            .data_store
+            .get_node(&date_node_id)
+            .await?
             .ok_or_else(|| NodeSpaceError::InternalError {
                 message: "Date node should exist after ensure_date_node_exists".to_string(),
                 service: "core-logic".to_string(),
             })?;
-        
+
         // Get hierarchical children using the hierarchy computation
         let children = self.build_ordered_hierarchy(&date_node_id, 1).await?;
-        
+
         let has_content = !children.is_empty();
         Ok(DateStructure {
             date_node,
@@ -2998,14 +3009,22 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
     }
 
     /// Build hierarchical structure with OrderedNode format
-    fn build_ordered_hierarchy<'a>(&'a self, parent_id: &'a NodeId, start_depth: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<OrderedNode>>> + Send + 'a>> {
+    fn build_ordered_hierarchy<'a>(
+        &'a self,
+        parent_id: &'a NodeId,
+        start_depth: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<OrderedNode>>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let children = self.get_children(parent_id).await?;
             let mut ordered_children = Vec::new();
-            
+
             for (index, child) in children.into_iter().enumerate() {
-                let grandchildren = self.build_ordered_hierarchy(&child.id, start_depth + 1).await?;
-                
+                let grandchildren = self
+                    .build_ordered_hierarchy(&child.id, start_depth + 1)
+                    .await?;
+
                 ordered_children.push(OrderedNode {
                     node: child,
                     children: grandchildren,
@@ -3013,7 +3032,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                     sibling_index: index as u32,
                 });
             }
-            
+
             Ok(ordered_children)
         })
     }
