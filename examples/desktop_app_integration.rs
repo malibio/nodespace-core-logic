@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).await?;
         println!("     ✅ Created example node: {}", example_node_id);
 
-        // Create sample date node for navigation  
+        // Create sample date node for navigation
         let date_node_id = service.ensure_date_node_exists(today).await?;
         println!(
             "     ✅ Created date node for today: {} ({})",
