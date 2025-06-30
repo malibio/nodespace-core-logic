@@ -1,4 +1,4 @@
-use nodespace_core_logic::{CoreLogic, DateNavigation, NodeSpaceService};
+use nodespace_core_logic::{CoreLogic, NodeSpaceService};
 use serde_json::json;
 
 /// Demonstrates the service container pattern with dependency injection
