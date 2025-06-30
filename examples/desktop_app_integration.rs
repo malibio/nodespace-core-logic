@@ -1,4 +1,4 @@
-use nodespace_core_logic::{CoreLogic, DateNavigation, LegacyCoreLogic, NodeSpaceService};
+use nodespace_core_logic::{CoreLogic, NodeSpaceService};
 use nodespace_data_store::LanceDataStore;
 use nodespace_nlp_engine::LocalNLPEngine;
 use serde_json::json;
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).await?;
         println!("     ✅ Created example node: {}", example_node_id);
 
-        // Create sample date node for navigation
+        // Create sample date node for navigation  
         let date_node = service.create_or_get_date_node(today).await?;
         println!(
             "     ✅ Created date node for today: {} ({})",
