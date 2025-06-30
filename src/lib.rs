@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use nodespace_core_types::{Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
+use nodespace_core_types::{DateNodeMetadata, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1262,6 +1262,15 @@ pub trait DateNavigation: Send + Sync {
     /// Navigate to a specific date with navigation context
     async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult>;
 
+    /// Find an existing date node by date (schema-based indexed lookup)
+    async fn find_date_node(&self, date: NaiveDate) -> NodeSpaceResult<Option<NodeId>>;
+
+    /// Ensure a date node exists, creating it if necessary (atomic find-or-create)
+    async fn ensure_date_node_exists(&self, date: NaiveDate) -> NodeSpaceResult<NodeId>;
+
+    /// Get date structure with hierarchical children for a specific date
+    async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure>;
+
     /// Get today's date for navigation
     fn get_today() -> NaiveDate {
         chrono::Utc::now().date_naive()
@@ -1383,6 +1392,23 @@ pub struct NavigationResult {
     pub nodes: Vec<Node>,
     pub has_previous: bool,
     pub has_next: bool,
+}
+
+/// Structured date representation with hierarchical organization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DateStructure {
+    pub date_node: Node,
+    pub children: Vec<OrderedNode>,
+    pub has_content: bool,
+}
+
+/// Hierarchically ordered node with position metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderedNode {
+    pub node: Node,
+    pub children: Vec<OrderedNode>,
+    pub depth: u32,
+    pub sibling_index: u32,
 }
 
 #[async_trait]
