@@ -517,7 +517,6 @@ mod tests {
         ) -> NodeSpaceResult<serde_json::Value> {
             Ok(serde_json::json!({"mock": "structured_data"}))
         }
-        }
 
         async fn analyze_content(
             &self,
@@ -633,6 +632,10 @@ mod tests {
 
     fn create_test_service() -> NodeSpaceService<MockDataStore, MockNLPEngine> {
         NodeSpaceService::new(MockDataStore::new(), MockNLPEngine::new())
+    }
+
+    fn create_test_service_with_failure(failure_mode: &str) -> NodeSpaceService<MockDataStore, MockNLPEngine> {
+        NodeSpaceService::new(MockDataStore::with_failure_mode(failure_mode), MockNLPEngine::new())
     }
 
     #[tokio::test]
@@ -2092,5 +2095,200 @@ mod tests {
             .move_subtree(&nonexistent_id, &existing_id)
             .await
             .is_err());
+    }
+
+    // ===== HIERARCHICAL FUNCTIONALITY TESTS =====
+
+    #[tokio::test]
+    async fn test_get_hierarchical_nodes_for_date_basic() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let test_date = chrono::NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+
+        // Create date node
+        let date_node_id = service.ensure_date_node_exists(test_date).await.unwrap();
+
+        // Create test nodes with parent relationships
+        let mut node1 = create_test_node("child1", "First child node");
+        node1.parent_id = Some(date_node_id.clone());
+        service.data_store.add_node(node1);
+
+        let mut node2 = create_test_node("child2", "Second child node");
+        node2.parent_id = Some(date_node_id.clone());
+        service.data_store.add_node(node2);
+
+        // Test the hierarchical API
+        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+
+        // Verify structure
+        assert_eq!(result.date_node.id, date_node_id);
+        assert_eq!(result.total_count, 2);
+        assert!(result.has_content);
+        assert_eq!(result.children.len(), 2);
+
+        // Verify child properties
+        for child in &result.children {
+            assert_eq!(child.depth, 0); // Direct children of date node
+            assert_eq!(child.parent_id, Some(date_node_id.clone()));
+            assert!(child.children.is_empty()); // No nested children in this test
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_hierarchical_nodes_for_date_nested() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let test_date = chrono::NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+
+        // Create date node
+        let date_node_id = service.ensure_date_node_exists(test_date).await.unwrap();
+
+        // Create parent node
+        let mut parent_node = create_test_node("parent", "Parent node");
+        parent_node.parent_id = Some(date_node_id.clone());
+        let parent_id = parent_node.id.clone();
+        service.data_store.add_node(parent_node);
+
+        // Create child node
+        let mut child_node = create_test_node("child", "Child node");
+        child_node.parent_id = Some(parent_id.clone());
+        service.data_store.add_node(child_node);
+
+        // Test hierarchical structure
+        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+
+        assert_eq!(result.total_count, 2); // Parent + child
+        assert!(result.has_content);
+        assert_eq!(result.children.len(), 1); // One direct child of date node
+
+        let top_level_child = &result.children[0];
+        assert_eq!(top_level_child.depth, 0);
+        assert_eq!(top_level_child.node.id, parent_id);
+        assert_eq!(top_level_child.children.len(), 1); // Has one nested child
+
+        let nested_child = &top_level_child.children[0];
+        assert_eq!(nested_child.depth, 1);
+        assert_eq!(nested_child.parent_id, Some(parent_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_hierarchical_nodes_for_date_empty() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let empty_date = chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+
+        // Test with date that has no nodes
+        let result = service.get_hierarchical_nodes_for_date(empty_date).await.unwrap();
+
+        assert_eq!(result.total_count, 0);
+        assert!(!result.has_content);
+        assert!(result.children.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_hierarchical_nodes_for_date_performance() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let test_date = chrono::NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        let date_node_id = service.ensure_date_node_exists(test_date).await.unwrap();
+
+        // Create multiple nodes to test performance
+        for i in 0..50 {
+            let mut node = create_test_node(&format!("node_{}", i), &format!("Content {}", i));
+            node.parent_id = Some(date_node_id.clone());
+            service.data_store.add_node(node);
+        }
+
+        let start = std::time::Instant::now();
+        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+        let duration = start.elapsed();
+
+        // Verify results
+        assert_eq!(result.total_count, 50);
+        assert!(result.has_content);
+        assert_eq!(result.children.len(), 50);
+
+        // Performance assertion (should be much faster than O(N) scan)
+        assert!(duration.as_millis() < 100, "Hierarchical lookup took too long: {:?}", duration);
+    }
+
+    #[tokio::test]
+    async fn test_get_hierarchical_nodes_for_date_error_handling() {
+        let service = create_test_service_with_failure("get_node");
+        service.initialize().await.unwrap();
+
+        let test_date = chrono::NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+
+        // First create a date node to trigger the get_node failure
+        let _ = service.ensure_date_node_exists(test_date).await;
+
+        // Should handle database errors gracefully when trying to get the date node
+        let result = service.get_hierarchical_nodes_for_date(test_date).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_structure_ordering() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let test_date = chrono::NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        let date_node_id = service.ensure_date_node_exists(test_date).await.unwrap();
+
+        // Create nodes in specific order
+        let mut node1 = create_test_node("first", "First node");
+        node1.parent_id = Some(date_node_id.clone());
+        service.data_store.add_node(node1);
+
+        let mut node2 = create_test_node("second", "Second node");
+        node2.parent_id = Some(date_node_id.clone());
+        service.data_store.add_node(node2);
+
+        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+
+        // Verify sibling indexing
+        assert_eq!(result.children.len(), 2);
+        assert_eq!(result.children[0].sibling_index, 0);
+        assert_eq!(result.children[1].sibling_index, 1);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_nodes_vs_flat_nodes_consistency() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let test_date = chrono::NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        let date_node_id = service.ensure_date_node_exists(test_date).await.unwrap();
+
+        // Create test nodes
+        for i in 0..5 {
+            let mut node = create_test_node(&format!("test_{}", i), &format!("Content {}", i));
+            node.parent_id = Some(date_node_id.clone());
+            service.data_store.add_node(node);
+        }
+
+        // Get results from both APIs
+        let flat_nodes = service.get_nodes_for_date(test_date).await.unwrap();
+        let hierarchical_result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+
+        // Verify consistency
+        assert_eq!(flat_nodes.len(), hierarchical_result.total_count);
+        assert_eq!(flat_nodes.len(), hierarchical_result.children.len());
+
+        // Verify all flat nodes appear in hierarchical structure
+        let hierarchical_node_ids: std::collections::HashSet<_> = hierarchical_result
+            .children
+            .iter()
+            .map(|child| &child.node.id)
+            .collect();
+
+        for flat_node in &flat_nodes {
+            assert!(hierarchical_node_ids.contains(&flat_node.id), 
+                "Node {} missing from hierarchical result", flat_node.id);
+        }
     }
 }
