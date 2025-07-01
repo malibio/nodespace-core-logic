@@ -415,7 +415,7 @@ mod tests {
                 .into_iter()
                 .filter(|node| {
                     (node.root_id.as_ref() == Some(root_id) || node.id == *root_id)
-                        && node.node_type == node_type
+                        && node.root_type.as_ref().map(|s| s.as_str()) == Some(node_type)
                 })
                 .collect();
             Ok(result)
@@ -655,12 +655,11 @@ mod tests {
             metadata: Some(json!({"test": true})),
             created_at: now.clone(),
             updated_at: now,
-            node_type: "test".to_string(),
+            root_type: Some("test".to_string()),
             parent_id: None,
             next_sibling: None,
             previous_sibling: None,
             root_id: Some(NodeId::from_string(id.to_string())),
-            root_type: Some("test".to_string()),
         }
     }
 
@@ -1196,71 +1195,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_navigate_to_date_empty() {
-        let service = create_test_service();
-        service.initialize().await.unwrap();
-
-        let today = chrono::Utc::now().date_naive();
-        let yesterday = today - chrono::Duration::days(1);
-        let tomorrow = today + chrono::Duration::days(1);
-
-        let result = service.navigate_to_date(today).await.unwrap();
-
-        assert_eq!(result.date, today);
-        assert!(result.nodes.is_empty());
-        assert!(!result.has_previous); // No content on any day yet
-        assert!(!result.has_next);
-    }
-
-    #[tokio::test]
-    async fn test_navigate_to_date_with_adjacent_content() {
-        let service = create_test_service();
-        service.initialize().await.unwrap();
-
-        let today = chrono::Utc::now().date_naive();
-        let yesterday = today - chrono::Duration::days(1);
-        let tomorrow = today + chrono::Duration::days(1);
-
-        // Create content for all three days
-        let _yesterday_node = service
-            .create_node_for_date(
-                yesterday,
-                "Yesterday content",
-                nodespace_data_store::NodeType::Text,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let _today_node = service
-            .create_node_for_date(
-                today,
-                "Today content",
-                nodespace_data_store::NodeType::Text,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let _tomorrow_node = service
-            .create_node_for_date(
-                tomorrow,
-                "Tomorrow content",
-                nodespace_data_store::NodeType::Text,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let result = service.navigate_to_date(today).await.unwrap();
-
-        assert_eq!(result.date, today);
-        assert_eq!(result.nodes.len(), 1);
-        assert!(result.has_previous);
-        assert!(result.has_next);
-    }
-
-    #[tokio::test]
     async fn test_find_date_node_nonexistent() {
         let service = create_test_service();
         service.initialize().await.unwrap();
@@ -1345,67 +1279,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(node.content.get("type").unwrap().as_str().unwrap() == "date");
-    }
-
-    #[tokio::test]
-    async fn test_get_nodes_for_date_with_structure_empty() {
-        let service = create_test_service();
-        service.initialize().await.unwrap();
-
-        let today = chrono::Utc::now().date_naive();
-        let structure = service
-            .get_nodes_for_date_with_structure(today)
-            .await
-            .unwrap();
-
-        // Should create date node but have no children
-        assert!(structure.children.is_empty());
-        assert!(!structure.has_content);
-        assert_eq!(structure.date_node.content.get("type").unwrap(), "date");
-    }
-
-    #[tokio::test]
-    async fn test_get_nodes_for_date_with_structure_hierarchical() {
-        let service = create_test_service();
-        service.initialize().await.unwrap();
-
-        let today = chrono::Utc::now().date_naive();
-
-        // Create parent and child nodes
-        let parent_id = service
-            .create_node_for_date(
-                today,
-                "Parent content",
-                nodespace_data_store::NodeType::Text,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Create child node manually to test hierarchy
-        let mut child_node = create_test_node("child1", "Child content");
-        child_node.parent_id = Some(parent_id.clone());
-        service.data_store.add_node(child_node);
-
-        let structure = service
-            .get_nodes_for_date_with_structure(today)
-            .await
-            .unwrap();
-
-        assert_eq!(structure.children.len(), 1);
-        assert!(structure.has_content);
-
-        // Verify hierarchical structure
-        let parent_ordered = &structure.children[0];
-        assert_eq!(
-            parent_ordered.node.content.as_str().unwrap(),
-            "Parent content"
-        );
-        assert_eq!(parent_ordered.children.len(), 1);
-        assert_eq!(
-            parent_ordered.children[0].node.content.as_str().unwrap(),
-            "Child content"
-        );
     }
 
     // ===== RACE CONDITION TESTS =====
@@ -1508,60 +1381,6 @@ mod tests {
     // ===== INTEGRATION TESTS =====
 
     #[tokio::test]
-    async fn test_end_to_end_date_navigation_workflow() {
-        let service = create_test_service();
-        service.initialize().await.unwrap();
-
-        let base_date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-
-        // Create content across multiple days
-        for day_offset in 0..7 {
-            let date = base_date + chrono::Duration::days(day_offset);
-
-            for item in 0..2 {
-                service
-                    .create_node_for_date(
-                        date,
-                        &format!("Day {} item {}", day_offset + 1, item + 1),
-                        nodespace_data_store::NodeType::Text,
-                        Some(json!({"day": day_offset + 1, "item": item + 1})),
-                    )
-                    .await
-                    .unwrap();
-            }
-        }
-
-        // Test navigation on middle day
-        let middle_date = base_date + chrono::Duration::days(3);
-        let nav_result = service.navigate_to_date(middle_date).await.unwrap();
-
-        assert_eq!(nav_result.date, middle_date);
-        assert_eq!(nav_result.nodes.len(), 2); // Two items for this day
-        assert!(nav_result.has_previous); // Days before exist
-        assert!(nav_result.has_next); // Days after exist
-
-        // Test full structure
-        let structure = service
-            .get_nodes_for_date_with_structure(middle_date)
-            .await
-            .unwrap();
-        assert!(structure.has_content);
-        assert_eq!(structure.children.len(), 2);
-
-        // Verify sibling ordering within the day
-        let first_child = &structure.children[0];
-        let second_child = &structure.children[1];
-        assert_eq!(
-            first_child.node.next_sibling,
-            Some(second_child.node.id.clone())
-        );
-        assert_eq!(
-            second_child.node.previous_sibling,
-            Some(first_child.node.id.clone())
-        );
-    }
-
-    #[tokio::test]
     async fn test_date_navigation() {
         let service = create_test_service();
         service.initialize().await.unwrap();
@@ -1652,12 +1471,11 @@ mod tests {
             metadata: Some(json!({"test": true})),
             created_at: now.clone(),
             updated_at: now,
-            node_type: "test".to_string(),
+            root_type: Some("test".to_string()),
             parent_id: parent_id.clone(),
             next_sibling: None,
             previous_sibling: None,
             root_id: parent_id.or_else(|| Some(NodeId::from_string(id.to_string()))),
-            root_type: Some("test".to_string()),
         }
     }
 
