@@ -1239,7 +1239,7 @@ pub trait CoreLogic: Send + Sync {
         node_id: &NodeId,
         operation: &str,
         target_parent_id: Option<&NodeId>,
-        previous_sibling_id: Option<&NodeId>,
+        _previous_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()>;
 
     /// Set node's parent (for indent/outdent operations)
@@ -1253,7 +1253,7 @@ pub trait CoreLogic: Send + Sync {
     async fn update_sibling_order(
         &self,
         node_id: &NodeId,
-        previous_sibling_id: Option<&NodeId>,
+        _previous_sibling_id: Option<&NodeId>,
         next_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()>;
 
@@ -1463,20 +1463,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         // Create the node with provided content and metadata
         let node_id = NodeId::new();
-        let now = chrono::Utc::now().to_rfc3339();
+        let _now = chrono::Utc::now().to_rfc3339();
 
-        let node = Node {
-            id: node_id.clone(),
-            content: serde_json::Value::String(content.to_string()),
-            metadata: Some(metadata),
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some("text".to_string()),
-            parent_id: None,
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: Some(node_id.clone()),
-        };
+        let mut node = Node::new("text".to_string(), serde_json::Value::String(content.to_string()));
+        node.id = node_id.clone();
+        node.metadata = Some(metadata);
+        node.root_id = Some(node_id.clone());
 
         // Store the node - data store will automatically generate embeddings using the EmbeddingGenerator
         self.data_store.store_node(node).await?;
@@ -1514,20 +1506,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         // Create new node with proper parent relationship
         let node_id = NodeId::new();
-        let now = chrono::Utc::now().to_rfc3339();
+        let _now = chrono::Utc::now().to_rfc3339();
 
-        let mut node = Node {
-            id: node_id.clone(),
-            content: serde_json::Value::String(content.to_string()),
-            metadata,
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some(format!("{:?}", _node_type).to_lowercase()),
-            parent_id: Some(date_node_id.clone()),
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: Some(date_node_id.clone()),
-        };
+        let mut node = Node::new(format!("{:?}", _node_type).to_lowercase(), serde_json::Value::String(content.to_string()));
+        node.id = node_id.clone();
+        node.metadata = metadata;
+        node.parent_id = Some(date_node_id.clone());
+        node.root_id = Some(date_node_id.clone());
 
         // Atomic sibling ordering - retry mechanism to handle race conditions
         let mut retry_count = 0;
@@ -1538,8 +1523,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             let siblings = self.get_children(&date_node_id).await?;
 
             if let Some(last_sibling) = siblings.last() {
-                node.previous_sibling = Some(last_sibling.id.clone());
-
                 // Optimistic concurrency: try to update both nodes
                 let previous_sibling_id = last_sibling.id.clone();
 
@@ -1840,21 +1823,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         // Step 3: Create nodes with pre-computed embeddings
         let mut node_ids = Vec::new();
-        
+
         for (i, (content, metadata)) in content_metadata_pairs.into_iter().enumerate() {
             // Create node structure
-            let node = Node {
-                id: NodeId::new(),
-                content: json!(content),
-                metadata: Some(metadata),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                updated_at: chrono::Utc::now().to_rfc3339(),
-                parent_id: None,
-                next_sibling: None,
-                previous_sibling: None,
-                root_id: None,  // Will be set appropriately by business logic
-                root_type: None,
-            };
+            let mut node = Node::new("text".to_string(), json!(content));
+            node.id = NodeId::new();
+            node.metadata = Some(metadata);
+            // root_id will be set appropriately by business logic
 
             // Store node with pre-computed embedding from batch
             let embedding = embeddings.get(i).ok_or_else(|| {
@@ -1867,7 +1842,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                 })
             })?;
 
-            let node_id = self.data_store.store_node_with_embedding(node, embedding.clone()).await?;
+            let node_id = self
+                .data_store
+                .store_node_with_embedding(node, embedding.clone())
+                .await?;
             node_ids.push(node_id);
         }
 
@@ -1880,7 +1858,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         node_id: &NodeId,
         operation: &str,
         target_parent_id: Option<&NodeId>,
-        previous_sibling_id: Option<&NodeId>,
+        _previous_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()> {
         let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
             NodeSpaceError::Database(DatabaseError::NotFound {
@@ -1898,8 +1876,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                     metadata["parent_id"] = serde_json::Value::String(parent_id.to_string());
                     node.metadata = Some(metadata);
 
-                    // Update sibling relationships if provided
-                    node.previous_sibling = previous_sibling_id.cloned();
+                    // Update sibling relationships if provided (only next_sibling in new schema)
                     node.next_sibling = None; // Will be updated by subsequent operations if needed
                 }
             }
@@ -1912,17 +1889,15 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                 }
 
                 // Reset sibling relationships
-                node.previous_sibling = previous_sibling_id.cloned();
                 node.next_sibling = None;
             }
             "move_up" | "move_down" => {
                 // Update sibling order without changing parent
-                node.previous_sibling = previous_sibling_id.cloned();
                 // next_sibling will be handled by update_sibling_order if needed
             }
             "reorder" => {
                 // Move to specific position in sibling list
-                node.previous_sibling = previous_sibling_id.cloned();
+                // Sibling ordering is handled through next_sibling field only
             }
             _ => {
                 return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
@@ -1974,7 +1949,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
     async fn update_sibling_order(
         &self,
         node_id: &NodeId,
-        previous_sibling_id: Option<&NodeId>,
+        _previous_sibling_id: Option<&NodeId>,
         next_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()> {
         let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
@@ -1986,14 +1961,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         })?;
 
         // Update the node's sibling pointers
-        node.previous_sibling = previous_sibling_id.cloned();
         node.next_sibling = next_sibling_id.cloned();
 
         // Update the updated node using the data store's update method
         self.data_store.update_node(node).await?;
 
         // Update affected siblings' pointers to maintain consistency
-        if let Some(prev_id) = previous_sibling_id {
+        if let Some(prev_id) = _previous_sibling_id {
             if let Some(mut prev_node) = self.data_store.get_node(prev_id).await? {
                 prev_node.next_sibling = Some(node_id.clone());
                 self.data_store.update_node(prev_node).await?;
@@ -2001,8 +1975,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         }
 
         if let Some(next_id) = next_sibling_id {
-            if let Some(mut next_node) = self.data_store.get_node(next_id).await? {
-                next_node.previous_sibling = Some(node_id.clone());
+            if let Some(next_node) = self.data_store.get_node(next_id).await? {
+                // Note: With unidirectional sibling navigation, we don't need to update next_node
+                // The previous sibling link is maintained implicitly through the current node's next_sibling
                 self.data_store.update_node(next_node).await?;
             }
         }
@@ -2084,7 +2059,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Create new date node with proper format
         let date_content = format!("# {}", date.format("%B %d, %Y"));
         let node_id = NodeId::new();
-        let now = chrono::Utc::now().to_rfc3339();
+        let _now = chrono::Utc::now().to_rfc3339();
 
         let mut metadata = serde_json::Map::new();
         metadata.insert(
@@ -2096,18 +2071,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             serde_json::Value::String("date".to_string()),
         );
 
-        let date_node = Node {
-            id: node_id.clone(),
-            content: serde_json::Value::String(date_content),
-            metadata: Some(serde_json::Value::Object(metadata)),
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some("date".to_string()),
-            parent_id: None, // Date nodes are top-level
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: Some(node_id.clone()), // Date nodes are their own root
-        };
+        let mut date_node = Node::new("date".to_string(), serde_json::Value::String(date_content));
+        date_node.id = node_id.clone();
+        date_node.metadata = Some(serde_json::Value::Object(metadata));
+        date_node.root_id = Some(node_id.clone()); // Date nodes are their own root
 
         self.data_store.store_node(date_node).await?;
 
@@ -2170,95 +2137,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 }
 
 /// Legacy CoreLogic interface for backward compatibility
-#[async_trait]
-pub trait LegacyCoreLogic {
-    /// Create a new node with automatic embedding generation
-    async fn create_node(
-        &self,
-        content: serde_json::Value,
-        metadata: Option<serde_json::Value>,
-    ) -> NodeSpaceResult<NodeId>;
-
-    /// Retrieve a node by ID
-    async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>>;
-
-    /// Delete a node
-    async fn delete_node(&self, id: &NodeId) -> NodeSpaceResult<()>;
-
-    /// Search nodes using semantic and text search
-    async fn search_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>>;
-
-    /// Process a RAG query: search for context + generate response
-    async fn process_rag_query(&self, query: &str) -> NodeSpaceResult<String>;
-
-    /// Create a relationship between nodes
-    async fn create_relationship(
-        &self,
-        from: &NodeId,
-        to: &NodeId,
-        rel_type: &str,
-    ) -> NodeSpaceResult<()>;
-}
-
-/// Legacy implementation for backward compatibility
-#[async_trait]
-impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
-    for NodeSpaceService<D, N>
-{
-    async fn create_node(
-        &self,
-        content: serde_json::Value,
-        metadata: Option<serde_json::Value>,
-    ) -> NodeSpaceResult<NodeId> {
-        let node_id = NodeId::new();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        let node = Node {
-            id: node_id.clone(),
-            content,
-            metadata,
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some("generic".to_string()),
-            parent_id: None,
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: Some(node_id.clone()),
-        };
-
-        self.data_store.store_node(node).await?;
-        Ok(node_id)
-    }
-
-    async fn get_node(&self, id: &NodeId) -> NodeSpaceResult<Option<Node>> {
-        self.data_store.get_node(id).await
-    }
-
-    async fn delete_node(&self, id: &NodeId) -> NodeSpaceResult<()> {
-        self.data_store.delete_node(id).await
-    }
-
-    async fn search_nodes(&self, query: &str) -> NodeSpaceResult<Vec<Node>> {
-        // For LanceDB: Simple content search
-        self.data_store.query_nodes(query).await
-    }
-
-    async fn process_rag_query(&self, query: &str) -> NodeSpaceResult<String> {
-        let response = self.process_query(query).await?;
-        Ok(response.answer)
-    }
-
-    async fn create_relationship(
-        &self,
-        from: &NodeId,
-        to: &NodeId,
-        rel_type: &str,
-    ) -> NodeSpaceResult<()> {
-        self.data_store
-            .create_relationship(from, to, rel_type)
-            .await
-    }
-}
 
 /// Hierarchy computation implementation for NodeSpaceService
 #[async_trait]
@@ -2467,13 +2345,14 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
         // OPTIMIZATION: Get nodes using indexed lookup instead of O(N) scan
         // Get the root node to determine its tree
-        let root_node = self.data_store.get_node(root_id).await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound {
+        let root_node = self.data_store.get_node(root_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
                 entity_type: "root node".to_string(),
                 id: root_id.to_string(),
                 suggestions: vec![],
-            }))?;
-        
+            })
+        })?;
+
         let tree_nodes = if let Some(tree_root_id) = root_node.root_id.as_ref() {
             // Use O(1) indexed lookup for root-based retrieval
             self.data_store.get_nodes_by_root(tree_root_id).await?
@@ -2481,10 +2360,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             // Fallback for nodes without root_id
             self.data_store.query_nodes("").await?
         };
-        
-        // Build indexed lookup once - O(N) 
+
+        // Build indexed lookup once - O(N)
         let parent_children_index = build_parent_children_index(&tree_nodes);
-        
+
         // Get descendants using optimized indexed lookup - O(D) instead of O(N*D)
         let descendants = get_all_descendants_optimized(&parent_children_index, root_id);
 
@@ -2528,10 +2407,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             // Fallback for nodes without root_id
             self.data_store.query_nodes("").await?
         };
-        
+
         // Build indexed lookup once - O(N)
         let parent_children_index = build_parent_children_index(&tree_nodes);
-        
+
         // Get descendants using optimized indexed lookup - O(D) instead of O(N*D)
         let descendants = get_all_descendants_optimized(&parent_children_index, root_id);
 
@@ -2670,20 +2549,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         let date_node_id = self.ensure_date_node_exists(date).await?;
 
         // Create new node with provided ID and proper parent relationship
-        let now = chrono::Utc::now().to_rfc3339();
+        let _now = chrono::Utc::now().to_rfc3339();
 
-        let mut node = Node {
-            id: node_id.clone(),
-            content: serde_json::Value::String(content.to_string()),
-            metadata,
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some(format!("{:?}", node_type).to_lowercase()), // Use debug format for now
-            parent_id: Some(date_node_id.clone()),
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: Some(date_node_id.clone()),
-        };
+        let mut node = Node::new(format!("{:?}", node_type).to_lowercase(), serde_json::Value::String(content.to_string()));
+        node.id = node_id.clone();
+        node.metadata = metadata;
+        node.parent_id = Some(date_node_id.clone());
+        node.root_id = Some(date_node_id.clone());
 
         // Atomic sibling ordering - retry mechanism to handle race conditions
         let mut retry_count = 0;
@@ -2694,8 +2566,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             let siblings = self.get_children(&date_node_id).await?;
 
             if let Some(last_sibling) = siblings.last() {
-                node.previous_sibling = Some(last_sibling.id.clone());
-
                 // Optimistic concurrency: try to update both nodes
                 let previous_sibling_id = last_sibling.id.clone();
 
@@ -2770,7 +2640,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 /// OPTIMIZED: Helper function to build parent-to-children index for O(1) lookups
 fn build_parent_children_index(all_nodes: &[Node]) -> HashMap<NodeId, Vec<Node>> {
     let mut parent_to_children: HashMap<NodeId, Vec<Node>> = HashMap::new();
-    
+
     for node in all_nodes {
         if let Some(parent_id) = &node.parent_id {
             parent_to_children
@@ -2779,12 +2649,15 @@ fn build_parent_children_index(all_nodes: &[Node]) -> HashMap<NodeId, Vec<Node>>
                 .push(node.clone());
         }
     }
-    
+
     parent_to_children
 }
 
 /// OPTIMIZED: Helper function to get all descendants using indexed lookups - O(D) instead of O(N*D)
-fn get_all_descendants_optimized(parent_to_children: &HashMap<NodeId, Vec<Node>>, parent_id: &NodeId) -> Vec<Node> {
+fn get_all_descendants_optimized(
+    parent_to_children: &HashMap<NodeId, Vec<Node>>,
+    parent_id: &NodeId,
+) -> Vec<Node> {
     let mut descendants = Vec::new();
     let mut to_process = vec![parent_id.clone()];
 
@@ -3575,10 +3448,15 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             return Ok(siblings);
         }
 
-        // Find the first sibling (no previous_sibling)
+        // Find the first sibling (the one that no other sibling points to with next_sibling)
         let first_sibling = siblings
             .iter()
-            .find(|node| node.previous_sibling.is_none())
+            .find(|node| {
+                // This node is first if no other sibling has it as next_sibling
+                !siblings.iter().any(|other| {
+                    other.next_sibling.as_ref() == Some(&node.id)
+                })
+            })
             .cloned();
 
         if let Some(first) = first_sibling {
@@ -3621,16 +3499,17 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
     async fn get_children_efficient(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
         // OPTIMIZATION: Use root-based indexed lookup instead of O(N) scan
         // Step 1: Get the parent node to determine its root_id
-        let parent_node = self.data_store.get_node(parent_id).await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound {
+        let parent_node = self.data_store.get_node(parent_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
                 entity_type: "parent node".to_string(),
                 id: parent_id.to_string(),
                 suggestions: vec![],
-            }))?;
-        
+            })
+        })?;
+
         // Step 2: Use indexed lookup by root to get only nodes in the same tree
         let tree_nodes = if let Some(root_id) = parent_node.root_id.as_ref() {
-            // Use O(1) indexed lookup for root-based retrieval  
+            // Use O(1) indexed lookup for root-based retrieval
             self.data_store.get_nodes_by_root(root_id).await?
         } else {
             // Fallback for nodes without root_id - this should be rare after optimization
@@ -3644,20 +3523,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             .collect();
 
         // Business logic: Sort by sibling chain for proper ordering
-        children.sort_by(|a, b| {
-            // If a has no previous sibling, it comes first
-            if a.previous_sibling.is_none() && b.previous_sibling.is_some() {
-                std::cmp::Ordering::Less
-            }
-            // If b has no previous sibling, it comes first
-            else if b.previous_sibling.is_none() && a.previous_sibling.is_some() {
-                std::cmp::Ordering::Greater
-            }
-            // For siblings with previous siblings, use creation time as fallback
-            else {
-                a.created_at.cmp(&b.created_at)
-            }
-        });
+        // With unidirectional next_sibling, we need to follow the chain
+        let mut node_map = HashMap::new();
+        for child in &children {
+            node_map.insert(child.id.clone(), child.clone());
+        }
+        children = self.sort_siblings_by_chain(children, &node_map)?;
 
         Ok(children)
     }

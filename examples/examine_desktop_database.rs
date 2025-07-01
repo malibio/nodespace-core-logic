@@ -25,9 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(next) = &date_node.next_sibling {
             println!("   ➡️  Next sibling: {}", next);
         }
-        if let Some(prev) = &date_node.previous_sibling {
-            println!("   ⬅️  Previous sibling: {}", prev);
-        }
+        // Note: previous_sibling field removed in NS-125
     } else {
         println!("   ❌ Date node not found");
     }
@@ -86,9 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("         Created: {}", node.created_at);
             println!(
-                "         Siblings: prev={:?}, next={:?}",
-                node.previous_sibling, node.next_sibling
+                "         Next sibling: {:?}",
+                node.next_sibling
             );
+            // Note: previous_sibling field removed in NS-125
             println!();
         }
     }
@@ -102,9 +101,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("         Metadata: {}", metadata);
             }
             println!(
-                "         Siblings: prev={:?}, next={:?}",
-                node.previous_sibling, node.next_sibling
+                "         Next sibling: {:?}",
+                node.next_sibling
             );
+            // Note: previous_sibling field removed in NS-125
         }
         println!();
     }
