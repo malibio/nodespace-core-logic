@@ -1350,6 +1350,17 @@ pub trait HierarchyComputation: Send + Sync {
         potential_ancestor: &NodeId,
         node_id: &NodeId,
     ) -> NodeSpaceResult<bool>;
+
+    /// Create a node for a specific date with a provided UUID (fire-and-forget pattern)
+    /// This eliminates the virtual node system by accepting UUIDs from the frontend
+    async fn create_node_for_date_with_id(
+        &self,
+        node_id: NodeId,
+        date: NaiveDate,
+        content: &str,
+        node_type: NodeType,
+        metadata: Option<serde_json::Value>,
+    ) -> NodeSpaceResult<()>;
 }
 
 /// Search result with relevance scoring
@@ -1493,9 +1504,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata: Some(metadata),
             created_at: now.clone(),
             updated_at: now,
+            node_type: "text".to_string(),
             parent_id: None,
             next_sibling: None,
             previous_sibling: None,
+            root_id: Some(node_id.clone()),
+            root_type: Some("text".to_string()),
         };
 
         // Store the node - data store will automatically generate embeddings using the EmbeddingGenerator
@@ -1542,9 +1556,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata,
             created_at: now.clone(),
             updated_at: now,
+            node_type: format!("{:?}", _node_type).to_lowercase(),
             parent_id: Some(date_node_id.clone()),
             next_sibling: None,
             previous_sibling: None,
+            root_id: Some(date_node_id.clone()),
+            root_type: Some("date".to_string()),
         };
 
         // Atomic sibling ordering - retry mechanism to handle race conditions
@@ -2088,9 +2105,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata: Some(serde_json::Value::Object(metadata)),
             created_at: now.clone(),
             updated_at: now,
+            node_type: "date".to_string(),
             parent_id: None, // Date nodes are top-level
             next_sibling: None,
             previous_sibling: None,
+            root_id: Some(node_id.clone()), // Date nodes are their own root
+            root_type: Some("date".to_string()),
         };
 
         self.data_store.store_node(date_node).await?;
@@ -2125,8 +2145,20 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             })?;
 
         // 🚀 OPTIMIZED: Get hierarchical structure using efficient root-based fetching
-        let children = self.get_hierarchy_for_root_efficient(&date_node_id).await?;
-        let has_content = !children.is_empty();
+        let nodes = self.get_hierarchy_for_root_efficient(&date_node_id).await?;
+        let has_content = !nodes.is_empty();
+
+        // Convert Vec<Node> to Vec<OrderedNode> for the DateStructure
+        let children: Vec<OrderedNode> = nodes
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| OrderedNode {
+                node,
+                children: Vec::new(), // For flat structure, no nested children
+                depth: 1,             // All direct children are depth 1
+                sibling_index: index as u32,
+            })
+            .collect();
 
         let structure = DateStructure {
             date_node,
@@ -2242,9 +2274,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
             metadata,
             created_at: now.clone(),
             updated_at: now,
+            node_type: "generic".to_string(),
             parent_id: None,
             next_sibling: None,
             previous_sibling: None,
+            root_id: Some(node_id.clone()),
+            root_type: Some("generic".to_string()),
         };
 
         self.data_store.store_node(node).await?;
@@ -2629,6 +2664,133 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         Ok(ancestors
             .iter()
             .any(|ancestor| ancestor.id == *potential_ancestor))
+    }
+
+    async fn create_node_for_date_with_id(
+        &self,
+        node_id: NodeId,
+        date: NaiveDate,
+        content: &str,
+        node_type: NodeType,
+        metadata: Option<serde_json::Value>,
+    ) -> NodeSpaceResult<()> {
+        let timer = self
+            .performance_monitor
+            .start_operation("create_node_for_date_with_id")
+            .with_metadata("date".to_string(), date.to_string())
+            .with_metadata("content_length".to_string(), content.len().to_string())
+            .with_metadata("node_id".to_string(), node_id.as_str().to_string());
+
+        // Check if service is ready
+        if !self.is_ready().await {
+            let state = self.get_state().await;
+            let error = NodeSpaceError::InternalError {
+                message: format!("Service not ready: {:?}", state),
+                service: "core-logic".to_string(),
+            };
+            timer.complete_error(error.to_string());
+            return Err(error);
+        }
+
+        // Ensure date node exists (creates if necessary using NodeType::Date schema)
+        let date_node_id = self.ensure_date_node_exists(date).await?;
+
+        // Create new node with provided ID and proper parent relationship
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let mut node = Node {
+            id: node_id.clone(),
+            content: serde_json::Value::String(content.to_string()),
+            metadata,
+            created_at: now.clone(),
+            updated_at: now,
+            node_type: format!("{:?}", node_type).to_lowercase(), // Use debug format for now
+            parent_id: Some(date_node_id.clone()),
+            next_sibling: None,
+            previous_sibling: None,
+            root_id: Some(date_node_id.clone()),
+            root_type: Some("date".to_string()),
+        };
+
+        // Atomic sibling ordering - retry mechanism to handle race conditions
+        let mut retry_count = 0;
+        const MAX_RETRIES: usize = 3;
+
+        loop {
+            // Get current children atomically
+            let siblings = self.get_children(&date_node_id).await?;
+
+            if let Some(last_sibling) = siblings.last() {
+                node.previous_sibling = Some(last_sibling.id.clone());
+
+                // Optimistic concurrency: try to update both nodes
+                let previous_sibling_id = last_sibling.id.clone();
+
+                // Store the new node first
+                self.data_store.store_node(node.clone()).await?;
+
+                // Attempt to update previous sibling atomically
+                match self.data_store.get_node(&previous_sibling_id).await {
+                    Ok(Some(mut prev_sibling)) => {
+                        // Verify this is still the current last sibling (no race condition)
+                        if prev_sibling.next_sibling.is_none() {
+                            prev_sibling.next_sibling = Some(node_id.clone());
+                            match self.data_store.store_node(prev_sibling).await {
+                                Ok(_) => break, // Success - atomic update completed
+                                Err(_) if retry_count < MAX_RETRIES => {
+                                    retry_count += 1;
+                                    // Clean up the orphaned node and retry
+                                    let _ = self.data_store.delete_node(&node_id).await;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    timer.complete_error(e.to_string());
+                                    return Err(e);
+                                }
+                            }
+                        } else {
+                            // Race condition detected - someone else added a sibling
+                            if retry_count < MAX_RETRIES {
+                                retry_count += 1;
+                                // Clean up and retry
+                                let _ = self.data_store.delete_node(&node_id).await;
+                                continue;
+                            } else {
+                                let error = NodeSpaceError::InternalError {
+                                    message: "Failed to maintain sibling ordering after retries"
+                                        .to_string(),
+                                    service: "core-logic".to_string(),
+                                };
+                                timer.complete_error(error.to_string());
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Previous sibling was deleted or error occurred
+                        if retry_count < MAX_RETRIES {
+                            retry_count += 1;
+                            let _ = self.data_store.delete_node(&node_id).await;
+                            continue;
+                        } else {
+                            let error = NodeSpaceError::InternalError {
+                                message: "Previous sibling disappeared during update".to_string(),
+                                service: "core-logic".to_string(),
+                            };
+                            timer.complete_error(error.to_string());
+                            return Err(error);
+                        }
+                    }
+                }
+            } else {
+                // No siblings, this is the first child
+                self.data_store.store_node(node).await?;
+                break;
+            }
+        }
+
+        timer.complete_success();
+        Ok(())
     }
 }
 
@@ -3330,6 +3492,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
     }
 
     /// Build hierarchical structure with OrderedNode format
+    #[allow(dead_code)]
     fn build_ordered_hierarchy<'a>(
         &'a self,
         parent_id: &'a NodeId,
