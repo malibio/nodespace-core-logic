@@ -2089,12 +2089,14 @@ mod tests {
         // Create parent node
         let mut parent_node = create_test_node("parent", "Parent node");
         parent_node.parent_id = Some(date_node_id.clone());
+        parent_node.root_id = Some(date_node_id.clone()); // Same root as date node
         let parent_id = parent_node.id.clone();
         service.data_store.add_node(parent_node);
 
         // Create child node
         let mut child_node = create_test_node("child", "Child node");
         child_node.parent_id = Some(parent_id.clone());
+        child_node.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(child_node);
 
         // Test hierarchical structure
@@ -2147,6 +2149,7 @@ mod tests {
         for i in 0..50 {
             let mut node = create_test_node(&format!("node_{}", i), &format!("Content {}", i));
             node.parent_id = Some(date_node_id.clone());
+            node.root_id = Some(date_node_id.clone()); // Same root as date node
             service.data_store.add_node(node);
         }
 
@@ -2196,10 +2199,12 @@ mod tests {
         // Create nodes in specific order
         let mut node1 = create_test_node("first", "First node");
         node1.parent_id = Some(date_node_id.clone());
+        node1.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node1);
 
         let mut node2 = create_test_node("second", "Second node");
         node2.parent_id = Some(date_node_id.clone());
+        node2.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node2);
 
         let result = service
