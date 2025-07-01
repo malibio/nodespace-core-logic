@@ -96,15 +96,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   ✅ Database contains existing data - no initialization needed");
     }
 
-    // Step 5: Demonstrate date navigation functionality
-    println!("\n5️⃣ Testing Date Navigation...");
-    let nav_result = service.navigate_to_date(today).await?;
-    println!("   📅 Navigation to {}:", nav_result.date);
-    println!("      - Nodes found: {}", nav_result.nodes.len());
-    println!("      - Has previous day: {}", nav_result.has_previous);
-    println!("      - Has next day: {}", nav_result.has_next);
+    // Step 5: Test getting nodes for date functionality
+    println!("\n5️⃣ Testing Date Node Retrieval...");
+    let nodes = service.get_nodes_for_date(today).await?;
+    println!("   📅 Nodes for {}:", today);
+    println!("      - Nodes found: {}", nodes.len());
 
-    for (i, node) in nav_result.nodes.iter().enumerate() {
+    for (i, node) in nodes.iter().enumerate() {
         if let Some(content) = node.content.as_str() {
             println!(
                 "      📝 Node {}: {}",

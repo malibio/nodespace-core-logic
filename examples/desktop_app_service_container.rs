@@ -85,21 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Test the functionality that was failing
-    println!("\n4️⃣ Testing Date Navigation (Previously Failing)");
-    let navigation_result = service.navigate_to_date(today).await?;
-    println!("   📅 Navigation to {}:", navigation_result.date);
-    println!(
-        "      - Found {} nodes (was 0 before)",
-        navigation_result.nodes.len()
-    );
-    println!(
-        "      - Has previous day: {}",
-        navigation_result.has_previous
-    );
-    println!("      - Has next day: {}", navigation_result.has_next);
+    println!("\n4️⃣ Testing Date Node Retrieval (Previously Failing)");
+    let nodes = service.get_nodes_for_date(today).await?;
+    println!("   📅 Nodes for {}:", today);
+    println!("      - Found {} nodes (was 0 before)", nodes.len());
 
     // Show the nodes that are now being returned
-    for (i, node) in navigation_result.nodes.iter().enumerate() {
+    for (i, node) in nodes.iter().enumerate() {
         if let Some(content) = node.content.as_str() {
             println!(
                 "      📝 Node {}: {}",
@@ -109,13 +101,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test yesterday (should still be empty)
-    let yesterday = today - chrono::Duration::days(1);
-    let yesterday_nodes = service.get_nodes_for_date(yesterday).await?;
-    println!("\n5️⃣ Testing Yesterday ({}) - Should Be Empty", yesterday);
+    // Test previous day (should still be empty)
+    let previous_day = today - chrono::Duration::days(1);
+    let previous_day_nodes = service.get_nodes_for_date(previous_day).await?;
     println!(
-        "   📊 Nodes for yesterday: {} (expected: 0)",
-        yesterday_nodes.len()
+        "\n5️⃣ Testing Previous Day ({}) - Should Be Empty",
+        previous_day
+    );
+    println!(
+        "   📊 Nodes for previous day: {} (expected: 0)",
+        previous_day_nodes.len()
     );
 
     println!("\n🎉 Problem Solved! Summary:");

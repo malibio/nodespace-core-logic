@@ -1190,26 +1190,11 @@ pub trait CoreLogic: Send + Sync {
     /// Get all text nodes for a specific date
     async fn get_nodes_for_date(&self, date: NaiveDate) -> NodeSpaceResult<Vec<Node>>;
 
-    /// Navigate to a specific date with navigation context
-    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult>;
-
     /// Find an existing date node by date (schema-based indexed lookup)
     async fn find_date_node(&self, date: NaiveDate) -> NodeSpaceResult<Option<NodeId>>;
 
     /// Ensure a date node exists, creating it if necessary (atomic find-or-create)
     async fn ensure_date_node_exists(&self, date: NaiveDate) -> NodeSpaceResult<NodeId>;
-
-    /// Get date structure with hierarchical children for a specific date
-    async fn get_nodes_for_date_with_structure(
-        &self,
-        date: NaiveDate,
-    ) -> NodeSpaceResult<DateStructure>;
-
-    /// Get hierarchical nodes for a date using indexed lookup with proper structure
-    async fn get_hierarchical_nodes_for_date(
-        &self,
-        date: NaiveDate,
-    ) -> NodeSpaceResult<HierarchicalNodes>;
 
     /// Get hierarchical nodes for a date using indexed lookup with proper structure
     async fn get_hierarchical_nodes_for_date(
@@ -1426,15 +1411,6 @@ pub struct QueryResponse {
     pub related_queries: Vec<String>,
 }
 
-/// Navigation result for date-based navigation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NavigationResult {
-    pub date: NaiveDate,
-    pub nodes: Vec<Node>,
-    pub has_previous: bool,
-    pub has_next: bool,
-}
-
 /// Hierarchical response with properly structured data for frontend consumption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HierarchicalNodes {
@@ -1452,23 +1428,6 @@ pub struct HierarchicalNode {
     pub depth: u32,
     pub sibling_index: u32,
     pub parent_id: Option<NodeId>,
-}
-
-/// Structured date representation with hierarchical organization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateStructure {
-    pub date_node: Node,
-    pub children: Vec<OrderedNode>,
-    pub has_content: bool,
-}
-
-/// Hierarchically ordered node with position metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderedNode {
-    pub node: Node,
-    pub children: Vec<OrderedNode>,
-    pub depth: u32,
-    pub sibling_index: u32,
 }
 
 #[async_trait]
@@ -1504,12 +1463,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata: Some(metadata),
             created_at: now.clone(),
             updated_at: now,
-            node_type: "text".to_string(),
+            root_type: Some("text".to_string()),
             parent_id: None,
             next_sibling: None,
             previous_sibling: None,
             root_id: Some(node_id.clone()),
-            root_type: Some("text".to_string()),
         };
 
         // Store the node - data store will automatically generate embeddings using the EmbeddingGenerator
@@ -1556,12 +1514,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata,
             created_at: now.clone(),
             updated_at: now,
-            node_type: format!("{:?}", _node_type).to_lowercase(),
+            root_type: Some(format!("{:?}", _node_type).to_lowercase()),
             parent_id: Some(date_node_id.clone()),
             next_sibling: None,
             previous_sibling: None,
             root_id: Some(date_node_id.clone()),
-            root_type: Some("date".to_string()),
         };
 
         // Atomic sibling ordering - retry mechanism to handle race conditions
@@ -2009,29 +1966,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         }
     }
 
-    async fn navigate_to_date(&self, date: NaiveDate) -> NodeSpaceResult<NavigationResult> {
-        let timer = self
-            .performance_monitor
-            .start_operation("navigate_to_date")
-            .with_metadata("date".to_string(), date.to_string());
-
-        let nodes = self.get_nodes_for_date(date).await?;
-
-        // Check for previous/next dates (simplified implementation)
-        let has_previous = true; // TODO: Implement actual previous date checking
-        let has_next = true; // TODO: Implement actual next date checking
-
-        let result = NavigationResult {
-            date,
-            nodes,
-            has_previous,
-            has_next,
-        };
-
-        timer.complete_success();
-        Ok(result)
-    }
-
     async fn find_date_node(&self, date: NaiveDate) -> NodeSpaceResult<Option<NodeId>> {
         let timer = self
             .performance_monitor
@@ -2105,69 +2039,17 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             metadata: Some(serde_json::Value::Object(metadata)),
             created_at: now.clone(),
             updated_at: now,
-            node_type: "date".to_string(),
+            root_type: Some("date".to_string()),
             parent_id: None, // Date nodes are top-level
             next_sibling: None,
             previous_sibling: None,
             root_id: Some(node_id.clone()), // Date nodes are their own root
-            root_type: Some("date".to_string()),
         };
 
         self.data_store.store_node(date_node).await?;
 
         timer.complete_success();
         Ok(node_id)
-    }
-
-    async fn get_nodes_for_date_with_structure(
-        &self,
-        date: NaiveDate,
-    ) -> NodeSpaceResult<DateStructure> {
-        let timer = self
-            .performance_monitor
-            .start_operation("get_nodes_for_date_with_structure")
-            .with_metadata("date".to_string(), date.to_string());
-
-        // Ensure date node exists first
-        let date_node_id = self.ensure_date_node_exists(date).await?;
-
-        // Get the date node
-        let date_node = self
-            .data_store
-            .get_node(&date_node_id)
-            .await?
-            .ok_or_else(|| {
-                NodeSpaceError::Database(DatabaseError::NotFound {
-                    entity_type: "date_node".to_string(),
-                    id: date_node_id.to_string(),
-                    suggestions: vec![],
-                })
-            })?;
-
-        // 🚀 OPTIMIZED: Get hierarchical structure using efficient root-based fetching
-        let nodes = self.get_hierarchy_for_root_efficient(&date_node_id).await?;
-        let has_content = !nodes.is_empty();
-
-        // Convert Vec<Node> to Vec<OrderedNode> for the DateStructure
-        let children: Vec<OrderedNode> = nodes
-            .into_iter()
-            .enumerate()
-            .map(|(index, node)| OrderedNode {
-                node,
-                children: Vec::new(), // For flat structure, no nested children
-                depth: 1,             // All direct children are depth 1
-                sibling_index: index as u32,
-            })
-            .collect();
-
-        let structure = DateStructure {
-            date_node,
-            children,
-            has_content,
-        };
-
-        timer.complete_success();
-        Ok(structure)
     }
 
     /// Get hierarchical nodes for a date using indexed lookup with proper structure
@@ -2274,12 +2156,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
             metadata,
             created_at: now.clone(),
             updated_at: now,
-            node_type: "generic".to_string(),
+            root_type: Some("generic".to_string()),
             parent_id: None,
             next_sibling: None,
             previous_sibling: None,
             root_id: Some(node_id.clone()),
-            root_type: Some("generic".to_string()),
         };
 
         self.data_store.store_node(node).await?;
@@ -2704,12 +2585,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             metadata,
             created_at: now.clone(),
             updated_at: now,
-            node_type: format!("{:?}", node_type).to_lowercase(), // Use debug format for now
+            root_type: Some(format!("{:?}", node_type).to_lowercase()), // Use debug format for now
             parent_id: Some(date_node_id.clone()),
             next_sibling: None,
             previous_sibling: None,
             root_id: Some(date_node_id.clone()),
-            root_type: Some("date".to_string()),
         };
 
         // Atomic sibling ordering - retry mechanism to handle race conditions
@@ -3489,69 +3369,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                     .join(" ")
             ),
         ]
-    }
-
-    /// Build hierarchical structure with OrderedNode format
-    #[allow(dead_code)]
-    fn build_ordered_hierarchy<'a>(
-        &'a self,
-        parent_id: &'a NodeId,
-        start_depth: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<OrderedNode>>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            // Resource bounds checking to prevent stack overflow and infinite recursion
-            if start_depth > constants::MAX_HIERARCHY_DEPTH {
-                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
-                    field: "hierarchy_depth".to_string(),
-                    expected: format!("≤ {}", constants::MAX_HIERARCHY_DEPTH),
-                    actual: start_depth.to_string(),
-                    examples: vec!["100".to_string(), "500".to_string()],
-                }));
-            }
-
-            let children = self.get_children(parent_id).await?;
-
-            // Check children count limit
-            if children.len() > constants::MAX_CHILDREN_PER_NODE {
-                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
-                    field: "children_count".to_string(),
-                    expected: format!("≤ {}", constants::MAX_CHILDREN_PER_NODE),
-                    actual: children.len().to_string(),
-                    examples: vec!["100".to_string(), "1000".to_string()],
-                }));
-            }
-
-            let mut ordered_children = Vec::new();
-            let mut total_processed = 0_usize;
-
-            for (index, child) in children.into_iter().enumerate() {
-                // Check total nodes limit to prevent memory exhaustion
-                total_processed += 1;
-                if total_processed > constants::MAX_TOTAL_HIERARCHY_NODES {
-                    return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
-                        field: "total_hierarchy_nodes".to_string(),
-                        expected: format!("≤ {}", constants::MAX_TOTAL_HIERARCHY_NODES),
-                        actual: total_processed.to_string(),
-                        examples: vec!["10000".to_string(), "25000".to_string()],
-                    }));
-                }
-
-                // Recursive call with bounds checking
-                let grandchildren = self
-                    .build_ordered_hierarchy(&child.id, start_depth + 1)
-                    .await?;
-                ordered_children.push(OrderedNode {
-                    node: child,
-                    children: grandchildren,
-                    depth: start_depth,
-                    sibling_index: index as u32,
-                });
-            }
-
-            Ok(ordered_children)
-        })
     }
 
     /// Build hierarchical structure with HierarchicalNode format
