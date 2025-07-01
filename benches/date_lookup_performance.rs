@@ -38,28 +38,26 @@ impl TestDataGenerator {
             let date = base_date + chrono::Duration::days(i);
             let date_node = Node::new(
                 "date".to_string(),
-                json!(format!("Daily notes for {}", date.format("%Y-%m-%d")))
+                json!(format!("Daily notes for {}", date.format("%Y-%m-%d"))),
             )
             .with_metadata(json!({
                 "date": date.format("%Y-%m-%d").to_string(),
                 "type": "date"
             }));
-            
+
             // For date nodes, root_id should point to themselves (self-referencing root)
             let mut final_date_node = date_node;
             final_date_node.root_id = Some(final_date_node.id.clone());
-            
-            self.nodes.insert(final_date_node.id.to_string(), final_date_node);
+
+            self.nodes
+                .insert(final_date_node.id.to_string(), final_date_node);
         }
 
         // Generate regular content nodes to create realistic dataset size
         for i in 365..(node_count) {
-            let node = Node::new(
-                "content".to_string(),
-                json!(format!("Content node {}", i))
-            )
-            .with_metadata(json!({"node_index": i}));
-            
+            let node = Node::new("content".to_string(), json!(format!("Content node {}", i)))
+                .with_metadata(json!({"node_index": i}));
+
             self.nodes.insert(node.id.to_string(), node);
         }
     }
@@ -100,7 +98,7 @@ impl TestDataGenerator {
             if node.r#type != "date" {
                 continue; // Skip non-date nodes immediately
             }
-            
+
             // Only check date nodes - much more efficient!
             if let Some(metadata) = &node.metadata {
                 if let Some(metadata_date) = metadata.get("date") {

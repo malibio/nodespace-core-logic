@@ -1465,7 +1465,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let node_id = NodeId::new();
         let _now = chrono::Utc::now().to_rfc3339();
 
-        let mut node = Node::new("text".to_string(), serde_json::Value::String(content.to_string()));
+        let mut node = Node::new(
+            "text".to_string(),
+            serde_json::Value::String(content.to_string()),
+        );
         node.id = node_id.clone();
         node.metadata = Some(metadata);
         node.root_id = Some(node_id.clone());
@@ -1508,7 +1511,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let node_id = NodeId::new();
         let _now = chrono::Utc::now().to_rfc3339();
 
-        let mut node = Node::new(format!("{:?}", _node_type).to_lowercase(), serde_json::Value::String(content.to_string()));
+        let mut node = Node::new(
+            format!("{:?}", _node_type).to_lowercase(),
+            serde_json::Value::String(content.to_string()),
+        );
         node.id = node_id.clone();
         node.metadata = metadata;
         node.parent_id = Some(date_node_id.clone());
@@ -1742,7 +1748,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                             }
                         }
                     }
-                    
+
                     // Check specific relationship types in metadata (if provided)
                     if !relationship_types.is_empty() {
                         for rel_type in &relationship_types {
@@ -2098,8 +2104,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                     })
                 })?;
 
-            // Build hierarchical structure
-            let children = self.build_hierarchical_structure(&date_node_id, 0).await?;
+            // Build hierarchical structure using single-query optimization
+            let children = self
+                .build_hierarchical_structure_efficient(&date_node_id)
+                .await?;
             let total_count = count_hierarchical_nodes(&children);
             let has_content = !children.is_empty();
 
@@ -2541,7 +2549,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         // Create new node with provided ID and proper parent relationship
         let _now = chrono::Utc::now().to_rfc3339();
 
-        let mut node = Node::new(format!("{:?}", node_type).to_lowercase(), serde_json::Value::String(content.to_string()));
+        let mut node = Node::new(
+            format!("{:?}", node_type).to_lowercase(),
+            serde_json::Value::String(content.to_string()),
+        );
         node.id = node_id.clone();
         node.metadata = metadata;
         node.parent_id = Some(date_node_id.clone());
@@ -3367,34 +3378,106 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         ]
     }
 
-    /// Build hierarchical structure with HierarchicalNode format
-    fn build_hierarchical_structure<'a>(
-        &'a self,
-        parent_id: &'a NodeId,
+    /// Efficient hierarchical structure building using single-query optimization
+    /// Replaces N+1 recursive queries with ONE database query + in-memory tree assembly
+    async fn build_hierarchical_structure_efficient(
+        &self,
+        parent_id: &NodeId,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        // Step 1: Get parent node to find root_id
+        let parent_node = self.data_store.get_node(parent_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "parent node".to_string(),
+                id: parent_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
+
+        // Step 2: Single query to get ALL nodes in the tree using root_id
+        let all_tree_nodes = if let Some(root_id) = &parent_node.root_id {
+            self.data_store.get_nodes_by_root(root_id).await?
+        } else {
+            // Fallback: if no root_id, get all nodes and filter for this tree
+            // This should be rare after proper root_id migration
+            self.data_store.query_nodes("").await?
+        };
+
+        // Step 3: Build complete hierarchy in memory from flat list
+        self.build_hierarchical_tree_from_flat_list(all_tree_nodes, parent_id, 0)
+    }
+
+    /// Build hierarchical tree structure from flat node list in memory
+    /// This eliminates recursive database calls by building the entire tree structure
+    /// from a single query result
+    fn build_hierarchical_tree_from_flat_list(
+        &self,
+        flat_nodes: Vec<Node>,
+        parent_id: &NodeId,
         start_depth: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = NodeSpaceResult<Vec<HierarchicalNode>>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            let children = self.get_children(parent_id).await?;
-            let mut hierarchical_children = Vec::new();
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        // Create lookup map for O(1) node access
+        let node_map: HashMap<NodeId, Node> =
+            flat_nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
 
-            for (index, child) in children.into_iter().enumerate() {
-                let grandchildren = self
-                    .build_hierarchical_structure(&child.id, start_depth + 1)
-                    .await?;
-
-                hierarchical_children.push(HierarchicalNode {
-                    node: child.clone(),
-                    children: grandchildren,
-                    depth: start_depth,
-                    sibling_index: index as u32,
-                    parent_id: Some(parent_id.clone()),
-                });
+        // Build parent-to-children mapping
+        let mut children_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for node in node_map.values() {
+            if let Some(parent) = &node.parent_id {
+                children_map
+                    .entry(parent.clone())
+                    .or_insert_with(Vec::new)
+                    .push(node.id.clone());
             }
+        }
 
-            Ok(hierarchical_children)
-        })
+        // Sort siblings using existing chain logic
+        for child_ids in children_map.values_mut() {
+            let child_nodes: Vec<Node> = child_ids
+                .iter()
+                .filter_map(|id| node_map.get(id).cloned())
+                .collect();
+            let sorted_nodes = self.sort_siblings_by_chain(child_nodes, &node_map)?;
+            *child_ids = sorted_nodes.into_iter().map(|n| n.id).collect();
+        }
+
+        // Recursively build hierarchical structure for children of parent_id
+        self.build_hierarchical_nodes_recursive(&node_map, &children_map, parent_id, start_depth)
+    }
+
+    /// Recursive helper for building HierarchicalNode structure in memory
+    /// (no database calls - works entirely from pre-loaded data)
+    fn build_hierarchical_nodes_recursive(
+        &self,
+        node_map: &HashMap<NodeId, Node>,
+        children_map: &HashMap<NodeId, Vec<NodeId>>,
+        parent_id: &NodeId,
+        depth: u32,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        let mut hierarchical_children = Vec::new();
+
+        if let Some(child_ids) = children_map.get(parent_id) {
+            for (index, child_id) in child_ids.iter().enumerate() {
+                if let Some(child_node) = node_map.get(child_id) {
+                    // Recursively build grandchildren (but all from memory, no DB calls)
+                    let grandchildren = self.build_hierarchical_nodes_recursive(
+                        node_map,
+                        children_map,
+                        child_id,
+                        depth + 1,
+                    )?;
+
+                    hierarchical_children.push(HierarchicalNode {
+                        node: child_node.clone(),
+                        children: grandchildren,
+                        depth,
+                        sibling_index: index as u32,
+                        parent_id: Some(parent_id.clone()),
+                    });
+                }
+            }
+        }
+
+        Ok(hierarchical_children)
     }
 
     /// Efficient root-based hierarchy fetching with indexed lookups - OPTIMIZED FOR O(1)
@@ -3448,9 +3531,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             .iter()
             .find(|node| {
                 // This node is first if no other sibling has it as next_sibling
-                !siblings.iter().any(|other| {
-                    other.next_sibling.as_ref() == Some(&node.id)
-                })
+                !siblings
+                    .iter()
+                    .any(|other| other.next_sibling.as_ref() == Some(&node.id))
             })
             .cloned();
 
