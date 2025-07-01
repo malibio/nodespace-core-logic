@@ -1,7 +1,6 @@
-// TEMPORARY: Disable integration tests due to trait method mismatches
-// TODO: Update integration tests to match new DataStore and NLPEngine interfaces
-#[cfg(disabled)]
-mod disabled_tests {
+// Integration tests updated to match current DataStore and NLPEngine interfaces
+#[cfg(test)]
+mod integration_tests {
     use nodespace_core_logic::{CoreLogic, NodeSpaceService};
     use nodespace_core_types::{Node, NodeId, NodeSpaceResult};
     use nodespace_data_store::DataStore;
@@ -153,6 +152,57 @@ mod disabled_tests {
                 .collect();
             Ok(results)
         }
+
+        // Missing methods that need to be implemented
+        async fn update_node(&self, node: Node) -> NodeSpaceResult<()> {
+            let mut nodes = self.nodes.write().await;
+            if let Some(existing) = nodes.iter_mut().find(|n| n.id == node.id) {
+                *existing = node;
+            }
+            Ok(())
+        }
+
+        async fn update_node_with_embedding(&self, node: Node, _embedding: Vec<f32>) -> NodeSpaceResult<()> {
+            self.update_node(node).await
+        }
+
+        // Multi-Level Embedding Support - stub implementations
+        async fn store_node_with_multi_embeddings(&self, node: Node, _embeddings: nodespace_data_store::MultiLevelEmbeddings) -> NodeSpaceResult<NodeId> {
+            self.store_node(node).await
+        }
+
+        async fn update_node_embeddings(&self, _node_id: &NodeId, _embeddings: nodespace_data_store::MultiLevelEmbeddings) -> NodeSpaceResult<()> {
+            Ok(())
+        }
+
+        async fn get_node_embeddings(&self, _node_id: &NodeId) -> NodeSpaceResult<Option<nodespace_data_store::MultiLevelEmbeddings>> {
+            Ok(None)
+        }
+
+        async fn search_by_individual_embedding(&self, embedding: Vec<f32>, limit: usize) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            self.search_similar_nodes(embedding, limit).await
+        }
+
+        async fn search_by_contextual_embedding(&self, embedding: Vec<f32>, limit: usize) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            self.search_similar_nodes(embedding, limit).await
+        }
+
+        async fn search_by_hierarchical_embedding(&self, embedding: Vec<f32>, limit: usize) -> NodeSpaceResult<Vec<(Node, f32)>> {
+            self.search_similar_nodes(embedding, limit).await
+        }
+
+        async fn hybrid_semantic_search(&self, _embeddings: nodespace_data_store::QueryEmbeddings, _config: nodespace_data_store::HybridSearchConfig) -> NodeSpaceResult<Vec<nodespace_data_store::SearchResult>> {
+            Ok(vec![])
+        }
+
+        // Hierarchy Optimization
+        async fn get_nodes_by_root(&self, _root_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+            Ok(vec![])
+        }
+
+        async fn get_nodes_by_root_and_type(&self, _root_id: &NodeId, _node_type: &str) -> NodeSpaceResult<Vec<Node>> {
+            Ok(vec![])
+        }
     }
 
     /// Mock NLP Engine for testing
@@ -178,14 +228,6 @@ mod disabled_tests {
                 "Generated response for: {}",
                 prompt.chars().take(50).collect::<String>()
             ))
-        }
-
-        async fn generate_surrealql(
-            &self,
-            _natural_query: &str,
-            _schema_context: &str,
-        ) -> NodeSpaceResult<String> {
-            Ok("SELECT * FROM nodes".to_string())
         }
 
         fn embedding_dimensions(&self) -> usize {
@@ -215,6 +257,59 @@ mod disabled_tests {
                     context_referenced: true,
                     sources_mentioned: vec!["mock-source".to_string()],
                     relevance_score: 0.8,
+                },
+            })
+        }
+
+        // Missing methods that need to be implemented
+        async fn extract_structured_data(&self, _text: &str, _schema_hint: &str) -> NodeSpaceResult<serde_json::Value> {
+            Ok(json!({"extracted": "data"}))
+        }
+
+        async fn generate_summary(&self, text: &str, max_length: Option<usize>) -> NodeSpaceResult<String> {
+            let limit = max_length.unwrap_or(100);
+            Ok(text.chars().take(limit).collect())
+        }
+
+        async fn analyze_content(&self, _text: &str, _analysis_type: &str) -> NodeSpaceResult<nodespace_nlp_engine::ContentAnalysis> {
+            Ok(nodespace_nlp_engine::ContentAnalysis {
+                sentiment: Some("neutral".to_string()),
+                topics: vec!["general".to_string()],
+                entities: vec![],
+                confidence: 0.8,
+                classification: "general".to_string(),
+                processing_time_ms: 50,
+            })
+        }
+
+        async fn generate_contextual_embedding(&self, _node: &Node, _context: &nodespace_nlp_engine::NodeContext) -> NodeSpaceResult<Vec<f32>> {
+            Ok(vec![0.2, 0.3, 0.4, 0.5, 0.6])
+        }
+
+        async fn generate_hierarchical_embedding(&self, _node: &Node, _path: &[Node]) -> NodeSpaceResult<Vec<f32>> {
+            Ok(vec![0.3, 0.4, 0.5, 0.6, 0.7])
+        }
+
+        async fn generate_all_embeddings(&self, node: &Node, context: &nodespace_nlp_engine::NodeContext, path: &[Node]) -> NodeSpaceResult<nodespace_nlp_engine::MultiLevelEmbeddings> {
+            let individual = self.generate_embedding(&node.content.to_string()).await?;
+            let contextual = self.generate_contextual_embedding(node, context).await?;
+            let hierarchical = self.generate_hierarchical_embedding(node, path).await?;
+            
+            Ok(nodespace_nlp_engine::MultiLevelEmbeddings {
+                individual,
+                contextual: Some(contextual),
+                hierarchical: Some(hierarchical),
+                context_strategy: nodespace_nlp_engine::ContextStrategy::RuleBased,
+                generated_at: chrono::Utc::now(),
+                generation_metrics: nodespace_nlp_engine::EmbeddingGenerationMetrics {
+                    total_time_ms: 50,
+                    individual_time_ms: 15,
+                    contextual_time_ms: Some(20),
+                    hierarchical_time_ms: Some(15),
+                    context_length: Some(10),
+                    path_depth: Some(1),
+                    cache_hits: 0,
+                    cache_misses: 0,
                 },
             })
         }
