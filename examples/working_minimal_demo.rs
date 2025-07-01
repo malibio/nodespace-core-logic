@@ -256,18 +256,9 @@ async fn main() -> NodeSpaceResult<()> {
 
     // Test basic node creation with proper fields
     println!("📝 Creating test node...");
-    let _test_node = Node {
-        id: NodeId::new(),
-        content: json!("This is a test node for the minimal demo"),
-        metadata: Some(json!({"type": "test", "demo": true})),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        parent_id: None,
-        next_sibling: None,
-        previous_sibling: None,
-        root_id: None,  // Required field for NS-115
-        root_type: None, // Required field for NS-115
-    };
+    let mut _test_node = Node::new("test".to_string(), json!("This is a test node for the minimal demo"));
+    _test_node.id = NodeId::new();
+    _test_node.metadata = Some(json!({"type": "test", "demo": true}));
 
     let node_id = service.create_knowledge_node("Test content for minimal demo", json!({"type": "test"})).await?;
     println!("✅ Created node with ID: {}", node_id);
