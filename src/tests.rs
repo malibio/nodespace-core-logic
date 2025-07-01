@@ -1003,7 +1003,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Schema migration in progress - will be fixed after core functionality"]
     async fn test_update_sibling_order() {
         let service = create_test_service();
         service.initialize().await.unwrap();
@@ -1047,7 +1046,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated_node1.next_sibling.unwrap(), node2_id);
 
-        let updated_node3 = service
+        let _updated_node3 = service
             .data_store
             .get_node(&node3_id)
             .await
