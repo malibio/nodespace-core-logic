@@ -1536,7 +1536,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                         if prev_sibling.next_sibling.is_none() {
                             prev_sibling.next_sibling = Some(node_id.clone());
                             match self.data_store.store_node(prev_sibling).await {
-                                Ok(_) => break, // Success - atomic update completed
+                                Ok(_) => {
+                                    // Success - atomic update completed, invalidate cache
+                                    self.invalidate_hierarchy_cache().await;
+                                    break;
+                                }
                                 Err(_) if retry_count < MAX_RETRIES => {
                                     retry_count += 1;
                                     // Clean up the orphaned node and retry
@@ -1578,6 +1582,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             } else {
                 // No siblings, this is the first child
                 self.data_store.store_node(node).await?;
+                self.invalidate_hierarchy_cache().await;
                 break;
             }
         }
@@ -1719,31 +1724,27 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             )
         };
 
-        // Optimized relationship lookup using batch operations
-        // Instead of loading all nodes, we can use targeted queries
-        let related_nodes = if relationship_types.is_empty() {
-            // Search for any mentions of the target node ID
-            self.data_store
-                .query_nodes(&node_id.to_string())
-                .await
-                .unwrap_or_default()
-        } else {
-            // For specific relationship types, we'd need more sophisticated querying
-            // For now, fall back to the general approach but cache results
-            let all_nodes = self.data_store.query_nodes("").await.unwrap_or_default();
-            all_nodes
-                .into_iter()
-                .filter(|node| {
-                    // Check if this node has a relationship to our target node
-                    if let Some(metadata) = &node.metadata {
-                        if let Some(mentions) = metadata.get("mentions") {
-                            if let Some(mentions_array) = mentions.as_array() {
-                                return mentions_array
-                                    .iter()
-                                    .any(|mention| mention.as_str() == Some(node_id.as_str()));
+        // Use unified metadata search logic for both empty and non-empty relationship types
+        let all_nodes = self.data_store.query_nodes("").await.unwrap_or_default();
+        let related_nodes: Vec<Node> = all_nodes
+            .into_iter()
+            .filter(|node| {
+                // Check if this node has a relationship to our target node
+                if let Some(metadata) = &node.metadata {
+                    // Check general mentions (for empty relationship_types)
+                    if let Some(mentions) = metadata.get("mentions") {
+                        if let Some(mentions_array) = mentions.as_array() {
+                            if mentions_array
+                                .iter()
+                                .any(|mention| mention.as_str() == Some(node_id.as_str()))
+                            {
+                                return true;
                             }
                         }
-                        // Also check for specific relationship types in metadata
+                    }
+                    
+                    // Check specific relationship types in metadata (if provided)
+                    if !relationship_types.is_empty() {
                         for rel_type in &relationship_types {
                             if let Some(relationships) = metadata.get("relationships") {
                                 if let Some(rel_obj) = relationships.as_object() {
@@ -1761,10 +1762,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                             }
                         }
                     }
-                    false
-                })
-                .collect()
-        };
+                }
+                false
+            })
+            .collect();
 
         let related_ids: Vec<NodeId> = related_nodes.into_iter().map(|node| node.id).collect();
 
@@ -2569,7 +2570,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
                         if prev_sibling.next_sibling.is_none() {
                             prev_sibling.next_sibling = Some(node_id.clone());
                             match self.data_store.store_node(prev_sibling).await {
-                                Ok(_) => break, // Success - atomic update completed
+                                Ok(_) => {
+                                    // Success - atomic update completed, invalidate cache
+                                    self.invalidate_hierarchy_cache().await;
+                                    break;
+                                }
                                 Err(_) if retry_count < MAX_RETRIES => {
                                     retry_count += 1;
                                     // Clean up the orphaned node and retry
@@ -2618,6 +2623,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             } else {
                 // No siblings, this is the first child
                 self.data_store.store_node(node).await?;
+                self.invalidate_hierarchy_cache().await;
                 break;
             }
         }

@@ -135,9 +135,32 @@ mod tests {
                     }
                 }
             } else {
-                // Fallback: simple content search for backward compatibility
+                // Enhanced content search for queries like "What is Rust?"
                 if let Some(content) = node.content.as_str() {
-                    content.to_lowercase().contains(&condition.to_lowercase())
+                    let content_lower = content.to_lowercase();
+                    let condition_lower = condition.to_lowercase();
+                    
+                    // Direct substring match
+                    if content_lower.contains(&condition_lower) {
+                        return true;
+                    }
+                    
+                    // Word-based matching - extract meaningful words
+                    let condition_words: Vec<&str> = condition_lower
+                        .split_whitespace()
+                        .filter(|word| word.len() > 2 && !["what", "is", "the", "how", "where", "when", "why"].contains(word))
+                        .collect();
+                    
+                    let content_words: Vec<&str> = content_lower
+                        .split_whitespace()
+                        .collect();
+                    
+                    // If any meaningful word from query appears in content, consider it a match
+                    condition_words.iter().any(|query_word| {
+                        content_words.iter().any(|content_word| {
+                            content_word.contains(query_word) || query_word.contains(content_word)
+                        })
+                    })
                 } else {
                     false
                 }
@@ -681,7 +704,12 @@ mod tests {
     async fn test_service_initialization_failure() {
         let data_store = MockDataStore::new();
         let nlp_engine = MockNLPEngine::with_failure_mode("generate_embedding");
-        let service = NodeSpaceService::new(data_store, nlp_engine);
+        
+        // Create a config that disables offline mode to force actual failures
+        let mut config = NodeSpaceConfig::default();
+        config.offline_config.enable_offline = false;
+        
+        let service = NodeSpaceService::with_config(data_store, nlp_engine, config);
 
         let result = service.initialize().await;
         assert!(result.is_err());
@@ -1398,9 +1426,12 @@ mod tests {
 
         // Set parent relationships - node1 and node2 are children of date node
         node1.parent_id = Some(date_node_id.clone());
+        node1.root_id = Some(date_node_id.clone());
         node2.parent_id = Some(date_node_id.clone());
+        node2.root_id = Some(date_node_id.clone());
         // node3 is a child of node1 (should be filtered out)
         node3.parent_id = Some(NodeId::from_string("1".to_string()));
+        node3.root_id = Some(date_node_id.clone());
 
         service.data_store.add_node(node1);
         service.data_store.add_node(node2);
