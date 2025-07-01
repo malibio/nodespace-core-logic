@@ -2021,18 +2021,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Should return at most one date node for any given date
         if let Some(date_node) = date_nodes.first() {
             // Verify this is actually a date node with correct structure
-            // Check both content.type and metadata.node_type for compatibility
-            let is_date_node = if let Some(content) = date_node.content.get("type") {
-                content.as_str() == Some("date")
-            } else if let Some(metadata) = &date_node.metadata {
-                if let Some(node_type) = metadata.get("node_type") {
-                    node_type.as_str() == Some("date")
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+            // Use the new schema's dedicated type field
+            let is_date_node = date_node.r#type == "date";
 
             if is_date_node {
                 timer.complete_success();

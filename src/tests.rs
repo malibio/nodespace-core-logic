@@ -106,17 +106,8 @@ mod tests {
 
                 match field {
                     "type" => {
-                        // Check node.content.type field
-                        if let Some(node_type) = node.content.get("type") {
-                            return node_type.as_str() == Some(value);
-                        }
-                        // Also check metadata.node_type for backward compatibility
-                        if let Some(metadata) = &node.metadata {
-                            if let Some(node_type) = metadata.get("node_type") {
-                                return node_type.as_str() == Some(value);
-                            }
-                        }
-                        false
+                        // Use the new schema's dedicated type field
+                        return node.r#type == value;
                     }
                     "date" => {
                         // Check node.metadata.date field for date nodes
@@ -1279,7 +1270,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(node.content.get("type").unwrap().as_str().unwrap() == "date");
+        assert!(node.r#type == "date");
     }
 
     // ===== RACE CONDITION TESTS =====
@@ -1481,7 +1472,8 @@ mod tests {
         );
         node.metadata = Some(json!({"test": true}));
         node.parent_id = parent_id.clone();
-        node.root_id = parent_id.or_else(|| Some(NodeId::from_string(id.to_string())));
+        // All nodes in the test hierarchy should have "root" as their root_id
+        node.root_id = Some(NodeId::from_string("root".to_string()));
         node
     }
 
@@ -2056,10 +2048,12 @@ mod tests {
         // Create test nodes with parent relationships
         let mut node1 = create_test_node("child1", "First child node");
         node1.parent_id = Some(date_node_id.clone());
+        node1.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node1);
 
         let mut node2 = create_test_node("child2", "Second child node");
         node2.parent_id = Some(date_node_id.clone());
+        node2.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node2);
 
         // Test the hierarchical API
