@@ -106,17 +106,8 @@ mod tests {
 
                 match field {
                     "type" => {
-                        // Check node.content.type field
-                        if let Some(node_type) = node.content.get("type") {
-                            return node_type.as_str() == Some(value);
-                        }
-                        // Also check metadata.node_type for backward compatibility
-                        if let Some(metadata) = &node.metadata {
-                            if let Some(node_type) = metadata.get("node_type") {
-                                return node_type.as_str() == Some(value);
-                            }
-                        }
-                        false
+                        // Use the new schema's dedicated type field
+                        return node.r#type == value;
                     }
                     "date" => {
                         // Check node.metadata.date field for date nodes
@@ -144,9 +135,32 @@ mod tests {
                     }
                 }
             } else {
-                // Fallback: simple content search for backward compatibility
+                // Enhanced content search for queries like "What is Rust?"
                 if let Some(content) = node.content.as_str() {
-                    content.to_lowercase().contains(&condition.to_lowercase())
+                    let content_lower = content.to_lowercase();
+                    let condition_lower = condition.to_lowercase();
+                    
+                    // Direct substring match
+                    if content_lower.contains(&condition_lower) {
+                        return true;
+                    }
+                    
+                    // Word-based matching - extract meaningful words
+                    let condition_words: Vec<&str> = condition_lower
+                        .split_whitespace()
+                        .filter(|word| word.len() > 2 && !["what", "is", "the", "how", "where", "when", "why"].contains(word))
+                        .collect();
+                    
+                    let content_words: Vec<&str> = content_lower
+                        .split_whitespace()
+                        .collect();
+                    
+                    // If any meaningful word from query appears in content, consider it a match
+                    condition_words.iter().any(|query_word| {
+                        content_words.iter().any(|content_word| {
+                            content_word.contains(query_word) || query_word.contains(content_word)
+                        })
+                    })
                 } else {
                     false
                 }
@@ -415,7 +429,7 @@ mod tests {
                 .into_iter()
                 .filter(|node| {
                     (node.root_id.as_ref() == Some(root_id) || node.id == *root_id)
-                        && node.root_type.as_ref().map(|s| s.as_str()) == Some(node_type)
+                        && node.r#type == node_type
                 })
                 .collect();
             Ok(result)
@@ -648,19 +662,14 @@ mod tests {
 
     /// Test helpers
     fn create_test_node(id: &str, content: &str) -> Node {
-        let now = chrono::Utc::now().to_rfc3339();
-        Node {
-            id: NodeId::from_string(id.to_string()),
-            content: json!(content),
-            metadata: Some(json!({"test": true})),
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some("test".to_string()),
-            parent_id: None,
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: Some(NodeId::from_string(id.to_string())),
-        }
+        let mut node = Node::with_id(
+            NodeId::from_string(id.to_string()),
+            "test".to_string(),
+            json!(content)
+        );
+        node.metadata = Some(json!({"test": true}));
+        node.root_id = Some(NodeId::from_string(id.to_string()));
+        node
     }
 
     fn create_test_service() -> NodeSpaceService<MockDataStore, MockNLPEngine> {
@@ -695,7 +704,12 @@ mod tests {
     async fn test_service_initialization_failure() {
         let data_store = MockDataStore::new();
         let nlp_engine = MockNLPEngine::with_failure_mode("generate_embedding");
-        let service = NodeSpaceService::new(data_store, nlp_engine);
+        
+        // Create a config that disables offline mode to force actual failures
+        let mut config = NodeSpaceConfig::default();
+        config.offline_config.enable_offline = false;
+        
+        let service = NodeSpaceService::with_config(data_store, nlp_engine, config);
 
         let result = service.initialize().await;
         assert!(result.is_err());
@@ -1018,8 +1032,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated_node2.previous_sibling.unwrap(), node1_id);
-        assert_eq!(updated_node2.next_sibling.unwrap(), node3_id);
+        // Note: previous_sibling removed - test navigation using next_sibling instead
+        // Verify forward navigation from node1 to node2
+        // DISABLED: Schema migration in progress
+        // assert_eq!(updated_node1.next_sibling.unwrap(), node2_id);
+        // assert_eq!(updated_node2.next_sibling.unwrap(), node3_id);
 
         let updated_node1 = service
             .data_store
@@ -1029,13 +1046,15 @@ mod tests {
             .unwrap();
         assert_eq!(updated_node1.next_sibling.unwrap(), node2_id);
 
-        let updated_node3 = service
+        let _updated_node3 = service
             .data_store
             .get_node(&node3_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated_node3.previous_sibling.unwrap(), node2_id);
+        // Note: previous_sibling removed - test navigation using next_sibling instead  
+        // Verify forward navigation from node2 to node3
+        assert_eq!(updated_node2.next_sibling.unwrap(), node3_id);
     }
 
     // ===== COMPREHENSIVE DATE-AWARE TESTS =====
@@ -1117,11 +1136,11 @@ mod tests {
 
         // First node should point to second as next sibling
         assert_eq!(node1.next_sibling.unwrap(), node2_id);
-        assert!(node1.previous_sibling.is_none());
+        // Note: previous_sibling removed - can only navigate forward
 
-        // Second node should point to first as previous sibling
-        assert_eq!(node2.previous_sibling.unwrap(), node1_id);
+        // Second node should be end of chain (no next sibling)
         assert!(node2.next_sibling.is_none());
+        // Note: previous_sibling removed - use next_sibling chain for navigation
     }
 
     #[tokio::test]
@@ -1278,7 +1297,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(node.content.get("type").unwrap().as_str().unwrap() == "date");
+        assert!(node.r#type == "date");
     }
 
     // ===== RACE CONDITION TESTS =====
@@ -1325,9 +1344,18 @@ mod tests {
         let mut current_id = None;
         let mut visited_count = 0;
 
-        // Find the first node (no previous sibling)
+        // Find the first node in chain by checking all nodes and their relationships
+        // Since previous_sibling is removed, we need to find the node that is not pointed to by any next_sibling
+        let mut pointed_to: std::collections::HashSet<String> = std::collections::HashSet::new();
         for node in &nodes {
-            if node.previous_sibling.is_none() {
+            if let Some(ref next_id) = node.next_sibling {
+                pointed_to.insert(next_id.to_string());
+            }
+        }
+        
+        // Find node that is not pointed to by any next_sibling (i.e., the first node)
+        for node in &nodes {
+            if !pointed_to.contains(&node.id.to_string()) {
                 current_id = Some(node.id.clone());
                 break;
             }
@@ -1397,9 +1425,12 @@ mod tests {
 
         // Set parent relationships - node1 and node2 are children of date node
         node1.parent_id = Some(date_node_id.clone());
+        node1.root_id = Some(date_node_id.clone());
         node2.parent_id = Some(date_node_id.clone());
+        node2.root_id = Some(date_node_id.clone());
         // node3 is a child of node1 (should be filtered out)
         node3.parent_id = Some(NodeId::from_string("1".to_string()));
+        node3.root_id = Some(date_node_id.clone());
 
         service.data_store.add_node(node1);
         service.data_store.add_node(node2);
@@ -1464,19 +1495,16 @@ mod tests {
     // === HIERARCHY COMPUTATION TESTS ===
 
     fn create_test_node_with_parent(id: &str, content: &str, parent_id: Option<NodeId>) -> Node {
-        let now = chrono::Utc::now().to_rfc3339();
-        Node {
-            id: NodeId::from_string(id.to_string()),
-            content: json!(content),
-            metadata: Some(json!({"test": true})),
-            created_at: now.clone(),
-            updated_at: now,
-            root_type: Some("test".to_string()),
-            parent_id: parent_id.clone(),
-            next_sibling: None,
-            previous_sibling: None,
-            root_id: parent_id.or_else(|| Some(NodeId::from_string(id.to_string()))),
-        }
+        let mut node = Node::with_id(
+            NodeId::from_string(id.to_string()),
+            "test".to_string(),
+            json!(content)
+        );
+        node.metadata = Some(json!({"test": true}));
+        node.parent_id = parent_id.clone();
+        // All nodes in the test hierarchy should have "root" as their root_id
+        node.root_id = Some(NodeId::from_string("root".to_string()));
+        node
     }
 
     async fn setup_hierarchy_test_data(service: &NodeSpaceService<MockDataStore, MockNLPEngine>) {
@@ -2050,10 +2078,12 @@ mod tests {
         // Create test nodes with parent relationships
         let mut node1 = create_test_node("child1", "First child node");
         node1.parent_id = Some(date_node_id.clone());
+        node1.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node1);
 
         let mut node2 = create_test_node("child2", "Second child node");
         node2.parent_id = Some(date_node_id.clone());
+        node2.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node2);
 
         // Test the hierarchical API
@@ -2089,12 +2119,14 @@ mod tests {
         // Create parent node
         let mut parent_node = create_test_node("parent", "Parent node");
         parent_node.parent_id = Some(date_node_id.clone());
+        parent_node.root_id = Some(date_node_id.clone()); // Same root as date node
         let parent_id = parent_node.id.clone();
         service.data_store.add_node(parent_node);
 
         // Create child node
         let mut child_node = create_test_node("child", "Child node");
         child_node.parent_id = Some(parent_id.clone());
+        child_node.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(child_node);
 
         // Test hierarchical structure
@@ -2147,6 +2179,7 @@ mod tests {
         for i in 0..50 {
             let mut node = create_test_node(&format!("node_{}", i), &format!("Content {}", i));
             node.parent_id = Some(date_node_id.clone());
+            node.root_id = Some(date_node_id.clone()); // Same root as date node
             service.data_store.add_node(node);
         }
 
@@ -2196,10 +2229,12 @@ mod tests {
         // Create nodes in specific order
         let mut node1 = create_test_node("first", "First node");
         node1.parent_id = Some(date_node_id.clone());
+        node1.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node1);
 
         let mut node2 = create_test_node("second", "Second node");
         node2.parent_id = Some(date_node_id.clone());
+        node2.root_id = Some(date_node_id.clone()); // Same root as date node
         service.data_store.add_node(node2);
 
         let result = service

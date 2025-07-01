@@ -27,4 +27,10 @@ arrow-array = "55"
 arrow-schema = "55"
 futures = "0.3"
 uuid = { version = "1.6", features = ["v4"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio-test = "0.4"
+
+[[bench]]
+name = "date_lookup_performance"
+harness = false
 
