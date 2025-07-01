@@ -395,6 +395,31 @@ mod tests {
         ) -> NodeSpaceResult<Vec<DataStoreSearchResult>> {
             Ok(vec![])
         }
+
+        async fn get_nodes_by_root(&self, root_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+            let all_nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let result: Vec<Node> = all_nodes
+                .into_iter()
+                .filter(|node| node.root_id.as_ref() == Some(root_id) || node.id == *root_id)
+                .collect();
+            Ok(result)
+        }
+
+        async fn get_nodes_by_root_and_type(
+            &self,
+            root_id: &NodeId,
+            node_type: &str,
+        ) -> NodeSpaceResult<Vec<Node>> {
+            let all_nodes: Vec<Node> = self.nodes.lock().unwrap().values().cloned().collect();
+            let result: Vec<Node> = all_nodes
+                .into_iter()
+                .filter(|node| {
+                    (node.root_id.as_ref() == Some(root_id) || node.id == *root_id)
+                        && node.node_type == node_type
+                })
+                .collect();
+            Ok(result)
+        }
     }
 
     /// Mock NLP Engine for testing
@@ -630,9 +655,12 @@ mod tests {
             metadata: Some(json!({"test": true})),
             created_at: now.clone(),
             updated_at: now,
+            node_type: "test".to_string(),
             parent_id: None,
             next_sibling: None,
             previous_sibling: None,
+            root_id: Some(NodeId::from_string(id.to_string())),
+            root_type: Some("test".to_string()),
         }
     }
 
@@ -1624,9 +1652,12 @@ mod tests {
             metadata: Some(json!({"test": true})),
             created_at: now.clone(),
             updated_at: now,
-            parent_id,
+            node_type: "test".to_string(),
+            parent_id: parent_id.clone(),
             next_sibling: None,
             previous_sibling: None,
+            root_id: parent_id.or_else(|| Some(NodeId::from_string(id.to_string()))),
+            root_type: Some("test".to_string()),
         }
     }
 
