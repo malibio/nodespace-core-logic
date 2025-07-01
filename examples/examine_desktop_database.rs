@@ -83,10 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("         Metadata: {}", metadata);
             }
             println!("         Created: {}", node.created_at);
-            println!(
-                "         Next sibling: {:?}",
-                node.next_sibling
-            );
+            println!("         Next sibling: {:?}", node.next_sibling);
             // Note: previous_sibling field removed in NS-125
             println!();
         }
@@ -100,10 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(metadata) = &node.metadata {
                 println!("         Metadata: {}", metadata);
             }
-            println!(
-                "         Next sibling: {:?}",
-                node.next_sibling
-            );
+            println!("         Next sibling: {:?}", node.next_sibling);
             // Note: previous_sibling field removed in NS-125
         }
         println!();

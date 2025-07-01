@@ -139,22 +139,24 @@ mod tests {
                 if let Some(content) = node.content.as_str() {
                     let content_lower = content.to_lowercase();
                     let condition_lower = condition.to_lowercase();
-                    
+
                     // Direct substring match
                     if content_lower.contains(&condition_lower) {
                         return true;
                     }
-                    
+
                     // Word-based matching - extract meaningful words
                     let condition_words: Vec<&str> = condition_lower
                         .split_whitespace()
-                        .filter(|word| word.len() > 2 && !["what", "is", "the", "how", "where", "when", "why"].contains(word))
+                        .filter(|word| {
+                            word.len() > 2
+                                && !["what", "is", "the", "how", "where", "when", "why"]
+                                    .contains(word)
+                        })
                         .collect();
-                    
-                    let content_words: Vec<&str> = content_lower
-                        .split_whitespace()
-                        .collect();
-                    
+
+                    let content_words: Vec<&str> = content_lower.split_whitespace().collect();
+
                     // If any meaningful word from query appears in content, consider it a match
                     condition_words.iter().any(|query_word| {
                         content_words.iter().any(|content_word| {
@@ -665,7 +667,7 @@ mod tests {
         let mut node = Node::with_id(
             NodeId::from_string(id.to_string()),
             "test".to_string(),
-            json!(content)
+            json!(content),
         );
         node.metadata = Some(json!({"test": true}));
         node.root_id = Some(NodeId::from_string(id.to_string()));
@@ -704,11 +706,11 @@ mod tests {
     async fn test_service_initialization_failure() {
         let data_store = MockDataStore::new();
         let nlp_engine = MockNLPEngine::with_failure_mode("generate_embedding");
-        
+
         // Create a config that disables offline mode to force actual failures
         let mut config = NodeSpaceConfig::default();
         config.offline_config.enable_offline = false;
-        
+
         let service = NodeSpaceService::with_config(data_store, nlp_engine, config);
 
         let result = service.initialize().await;
@@ -1052,7 +1054,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        // Note: previous_sibling removed - test navigation using next_sibling instead  
+        // Note: previous_sibling removed - test navigation using next_sibling instead
         // Verify forward navigation from node2 to node3
         assert_eq!(updated_node2.next_sibling.unwrap(), node3_id);
     }
@@ -1352,7 +1354,7 @@ mod tests {
                 pointed_to.insert(next_id.to_string());
             }
         }
-        
+
         // Find node that is not pointed to by any next_sibling (i.e., the first node)
         for node in &nodes {
             if !pointed_to.contains(&node.id.to_string()) {
@@ -1498,7 +1500,7 @@ mod tests {
         let mut node = Node::with_id(
             NodeId::from_string(id.to_string()),
             "test".to_string(),
-            json!(content)
+            json!(content),
         );
         node.metadata = Some(json!({"test": true}));
         node.parent_id = parent_id.clone();
