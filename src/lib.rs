@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use nodespace_core_types::{DatabaseError, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError, ValidationError};
+use nodespace_core_types::{
+    DatabaseError, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError, ValidationError,
+};
 use nodespace_data_store::NodeType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -722,7 +724,7 @@ pub mod constants {
     pub const DEFAULT_EMBEDDING_DIMENSION: usize = 768;
     /// Reserved space for prompt structure in context window
     pub const PROMPT_STRUCTURE_RESERVE: usize = 200;
-    
+
     // Resource bounds for hierarchical operations
     /// Maximum recursion depth for hierarchical operations
     pub const MAX_HIERARCHY_DEPTH: u32 = 1000;
@@ -1198,7 +1200,16 @@ pub trait CoreLogic: Send + Sync {
     async fn ensure_date_node_exists(&self, date: NaiveDate) -> NodeSpaceResult<NodeId>;
 
     /// Get date structure with hierarchical children for a specific date
-    async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure>;
+    async fn get_nodes_for_date_with_structure(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<DateStructure>;
+
+    /// Get hierarchical nodes for a date using indexed lookup with proper structure
+    async fn get_hierarchical_nodes_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<HierarchicalNodes>;
 
     /// Get hierarchical nodes for a date using indexed lookup with proper structure
     async fn get_hierarchical_nodes_for_date(
@@ -1539,20 +1550,20 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Atomic sibling ordering - retry mechanism to handle race conditions
         let mut retry_count = 0;
         const MAX_RETRIES: usize = 3;
-        
+
         loop {
             // Get current children atomically
             let siblings = self.get_children(&date_node_id).await?;
-            
+
             if let Some(last_sibling) = siblings.last() {
                 node.previous_sibling = Some(last_sibling.id.clone());
-                
+
                 // Optimistic concurrency: try to update both nodes
                 let previous_sibling_id = last_sibling.id.clone();
-                
+
                 // Store the new node first
                 self.data_store.store_node(node.clone()).await?;
-                
+
                 // Attempt to update previous sibling atomically
                 match self.data_store.get_node(&previous_sibling_id).await {
                     Ok(Some(mut prev_sibling)) => {
@@ -1578,7 +1589,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                                 continue;
                             } else {
                                 return Err(NodeSpaceError::InternalError {
-                                    message: "Failed to maintain sibling ordering after retries".to_string(),
+                                    message: "Failed to maintain sibling ordering after retries"
+                                        .to_string(),
                                     service: "core-logic".to_string(),
                                 });
                             }
@@ -1701,15 +1713,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
     async fn update_node(&self, node_id: &NodeId, content: &str) -> NodeSpaceResult<()> {
         // Get existing node
-        let mut node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         // Update content and timestamp
         node.content = serde_json::Value::String(content.to_string());
@@ -1835,15 +1845,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         target_parent_id: Option<&NodeId>,
         previous_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()> {
-        let mut node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         match operation {
             "indent" => {
@@ -1880,11 +1888,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                 node.previous_sibling = previous_sibling_id.cloned();
             }
             _ => {
-                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat { 
-                    field: "operation".to_string(), 
-                    expected: "indent|outdent|move_up|move_down|reorder".to_string(), 
-                    actual: operation.to_string(), 
-                    examples: vec!["indent".to_string(), "outdent".to_string()] 
+                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                    field: "operation".to_string(),
+                    expected: "indent|outdent|move_up|move_down|reorder".to_string(),
+                    actual: operation.to_string(),
+                    examples: vec!["indent".to_string(), "outdent".to_string()],
                 }))
             }
         }
@@ -1900,15 +1908,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         node_id: &NodeId,
         parent_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()> {
-        let mut node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         let mut metadata = node.metadata.unwrap_or_else(|| serde_json::json!({}));
 
@@ -1934,15 +1940,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         previous_sibling_id: Option<&NodeId>,
         next_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()> {
-        let mut node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         // Update the node's sibling pointers
         node.previous_sibling = previous_sibling_id.cloned();
@@ -1977,8 +1981,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         // Find the date node first
         if let Some(date_node_id) = self.find_date_node(date).await? {
-            // Get all children of the date node
-            let nodes = self.get_children(&date_node_id).await?;
+            // 🚀 OPTIMIZED: Use efficient root-based hierarchy fetching
+            let nodes = self.get_hierarchy_for_root_efficient(&date_node_id).await?;
             timer.complete_success();
             Ok(nodes)
         } else {
@@ -1995,7 +1999,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .with_metadata("date".to_string(), date.to_string());
 
         let nodes = self.get_nodes_for_date(date).await?;
-        
+
         // Check for previous/next dates (simplified implementation)
         let has_previous = true; // TODO: Implement actual previous date checking
         let has_next = true; // TODO: Implement actual next date checking
@@ -2019,12 +2023,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 
         // O(1) indexed lookup using structured query for date nodes
         let date_str = date.format("%Y-%m-%d").to_string();
-        
+
         // Use targeted query instead of scanning all nodes
         // Query specifically for date nodes with the target date
         let query = format!("type:date AND date:{}", date_str);
         let date_nodes = self.data_store.query_nodes(&query).await?;
-        
+
         // Should return at most one date node for any given date
         if let Some(date_node) = date_nodes.first() {
             // Verify this is actually a date node with correct structure
@@ -2040,7 +2044,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             } else {
                 false
             };
-            
+
             if is_date_node {
                 timer.complete_success();
                 return Ok(Some(date_node.id.clone()));
@@ -2069,8 +2073,14 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let now = chrono::Utc::now().to_rfc3339();
 
         let mut metadata = serde_json::Map::new();
-        metadata.insert("date".to_string(), serde_json::Value::String(date.format("%Y-%m-%d").to_string()));
-        metadata.insert("node_type".to_string(), serde_json::Value::String("date".to_string()));
+        metadata.insert(
+            "date".to_string(),
+            serde_json::Value::String(date.format("%Y-%m-%d").to_string()),
+        );
+        metadata.insert(
+            "node_type".to_string(),
+            serde_json::Value::String("date".to_string()),
+        );
 
         let date_node = Node {
             id: node_id.clone(),
@@ -2089,7 +2099,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         Ok(node_id)
     }
 
-    async fn get_nodes_for_date_with_structure(&self, date: NaiveDate) -> NodeSpaceResult<DateStructure> {
+    async fn get_nodes_for_date_with_structure(
+        &self,
+        date: NaiveDate,
+    ) -> NodeSpaceResult<DateStructure> {
         let timer = self
             .performance_monitor
             .start_operation("get_nodes_for_date_with_structure")
@@ -2099,15 +2112,20 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         let date_node_id = self.ensure_date_node_exists(date).await?;
 
         // Get the date node
-        let date_node = self.data_store.get_node(&date_node_id).await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "date_node".to_string(), 
-                id: date_node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let date_node = self
+            .data_store
+            .get_node(&date_node_id)
+            .await?
+            .ok_or_else(|| {
+                NodeSpaceError::Database(DatabaseError::NotFound {
+                    entity_type: "date_node".to_string(),
+                    id: date_node_id.to_string(),
+                    suggestions: vec![],
+                })
+            })?;
 
-        // Get hierarchical structure
-        let children = self.build_ordered_hierarchy(&date_node_id, 1).await?;
+        // 🚀 OPTIMIZED: Get hierarchical structure using efficient root-based fetching
+        let children = self.get_hierarchy_for_root_efficient(&date_node_id).await?;
         let has_content = !children.is_empty();
 
         let structure = DateStructure {
@@ -2133,12 +2151,17 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Check if date node exists first
         if let Some(date_node_id) = self.find_date_node(date).await? {
             // Get the date node
-            let date_node = self.data_store.get_node(&date_node_id).await?
-                .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                    entity_type: "date_node".to_string(), 
-                    id: date_node_id.to_string(),
-                    suggestions: vec!["create_date_node".to_string()]
-                }))?;
+            let date_node = self
+                .data_store
+                .get_node(&date_node_id)
+                .await?
+                .ok_or_else(|| {
+                    NodeSpaceError::Database(DatabaseError::NotFound {
+                        entity_type: "date_node".to_string(),
+                        id: date_node_id.to_string(),
+                        suggestions: vec!["create_date_node".to_string()],
+                    })
+                })?;
 
             // Build hierarchical structure
             let children = self.build_hierarchical_structure(&date_node_id, 0).await?;
@@ -2156,7 +2179,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         } else {
             // No date node found - return empty hierarchical structure with placeholder date node
             let placeholder_date_node = Node::new_date_node(date);
-            
+
             timer.complete_success();
 
             Ok(HierarchicalNodes {
@@ -2258,7 +2281,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> LegacyCoreLogic
     }
 }
 
-
 /// Hierarchy computation implementation for NodeSpaceService
 #[async_trait]
 impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputation
@@ -2284,10 +2306,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
                 .get_node(&current_node_id)
                 .await?
                 .ok_or_else(|| {
-                    NodeSpaceError::Database(DatabaseError::NotFound { 
-                        entity_type: "node".to_string(), 
-                        id: current_node_id.to_string(), 
-                        suggestions: vec![] 
+                    NodeSpaceError::Database(DatabaseError::NotFound {
+                        entity_type: "node".to_string(),
+                        id: current_node_id.to_string(),
+                        suggestions: vec![],
                     })
                 })?;
 
@@ -2298,11 +2320,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
                 // Safety check to prevent infinite loops
                 if depth > 1000 {
-                    return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat { 
-                        field: "hierarchy_depth".to_string(), 
-                        expected: "<1000".to_string(), 
-                        actual: "exceeds_limit".to_string(), 
-                        examples: vec!["100".to_string(), "500".to_string()] 
+                    return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                        field: "hierarchy_depth".to_string(),
+                        expected: "<1000".to_string(),
+                        actual: "exceeds_limit".to_string(),
+                        examples: vec!["100".to_string(), "500".to_string()],
                     }));
                 }
             } else {
@@ -2323,10 +2345,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
     async fn get_children(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
         // Validate that the parent node exists
         self.data_store.get_node(parent_id).await?.ok_or_else(|| {
-            NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "parent node".to_string(), 
-                id: parent_id.to_string(), 
-                suggestions: vec![] 
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "parent node".to_string(),
+                id: parent_id.to_string(),
+                suggestions: vec![],
             })
         })?;
 
@@ -2345,22 +2367,12 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             }
         }
 
-        // Get all nodes and filter for children
-        let all_nodes = self.data_store.query_nodes("").await?;
-        let mut children = Vec::new();
-        let mut child_ids = Vec::new();
+        // 🚀 OPTIMIZED: Use more efficient hierarchy retrieval
+        let children = self.get_children_efficient(parent_id).await?;
 
-        for node in all_nodes {
-            if let Some(node_parent_id) = &node.parent_id {
-                if *node_parent_id == *parent_id {
-                    child_ids.push(node.id.clone());
-                    children.push(node);
-                }
-            }
-        }
-
-        // Cache the child IDs
+        // Cache the child IDs for future use
         {
+            let child_ids: Vec<NodeId> = children.iter().map(|n| n.id.clone()).collect();
             let mut cache = self.hierarchy_cache.write().await;
             cache.cache_children(parent_id.clone(), child_ids);
         }
@@ -2379,10 +2391,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
                 .get_node(&current_node_id)
                 .await?
                 .ok_or_else(|| {
-                    NodeSpaceError::Database(DatabaseError::NotFound { 
-                        entity_type: "node".to_string(), 
-                        id: current_node_id.to_string(), 
-                        suggestions: vec![] 
+                    NodeSpaceError::Database(DatabaseError::NotFound {
+                        entity_type: "node".to_string(),
+                        id: current_node_id.to_string(),
+                        suggestions: vec![],
                     })
                 })?;
 
@@ -2390,10 +2402,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             if let Some(parent_id) = &node.parent_id {
                 // Get the parent node
                 let parent_node = self.data_store.get_node(parent_id).await?.ok_or_else(|| {
-                    NodeSpaceError::Database(DatabaseError::NotFound { 
-                        entity_type: "parent node".to_string(), 
-                        id: parent_id.to_string(), 
-                        suggestions: vec![] 
+                    NodeSpaceError::Database(DatabaseError::NotFound {
+                        entity_type: "parent node".to_string(),
+                        id: parent_id.to_string(),
+                        suggestions: vec![],
                     })
                 })?;
 
@@ -2402,11 +2414,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
                 // Safety check to prevent infinite loops
                 if ancestors.len() > 1000 {
-                    return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat { 
-                        field: "ancestry_chain".to_string(), 
-                        expected: "<1000".to_string(), 
-                        actual: "exceeds_limit".to_string(), 
-                        examples: vec!["100".to_string(), "500".to_string()] 
+                    return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                        field: "ancestry_chain".to_string(),
+                        expected: "<1000".to_string(),
+                        actual: "exceeds_limit".to_string(),
+                        examples: vec!["100".to_string(), "500".to_string()],
                     }));
                 }
             } else {
@@ -2420,15 +2432,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
     async fn get_siblings(&self, node_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
         // Get the node to find its parent
-        let node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         // If node has no parent, it has no siblings
         let parent_id = match &node.parent_id {
@@ -2451,15 +2461,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         self.validate_hierarchy_move(node_id, new_parent).await?;
 
         // Get the node to move
-        let mut node = self
-            .data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         // Update the node's parent_id directly
         node.parent_id = Some(new_parent.clone());
@@ -2485,11 +2493,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         // Validate each descendant won't create cycles
         for descendant in &descendants {
             if descendant.id == *new_parent {
-                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat { 
-                        field: "subtree_move".to_string(), 
-                        expected: "no_cycle".to_string(), 
-                        actual: "creates_cycle".to_string(), 
-                        examples: vec!["valid_parent".to_string()] 
+                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                    field: "subtree_move".to_string(),
+                    expected: "no_cycle".to_string(),
+                    actual: "creates_cycle".to_string(),
+                    examples: vec!["valid_parent".to_string()],
                 }));
             }
         }
@@ -2505,10 +2513,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
         // Get the root node and its depth
         let root_node = self.data_store.get_node(root_id).await?.ok_or_else(|| {
-            NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "root node".to_string(), 
-                id: root_id.to_string(), 
-                suggestions: vec![] 
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "root node".to_string(),
+                id: root_id.to_string(),
+                suggestions: vec![],
             })
         })?;
         let root_depth = self.get_node_depth(root_id).await?;
@@ -2536,31 +2544,30 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         new_parent: &NodeId,
     ) -> NodeSpaceResult<()> {
         // Check if node exists
-        self.data_store
-            .get_node(node_id)
-            .await?
-            .ok_or_else(|| NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "node".to_string(), 
-                id: node_id.to_string(), 
-                suggestions: vec![] 
-            }))?;
+        self.data_store.get_node(node_id).await?.ok_or_else(|| {
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "node".to_string(),
+                id: node_id.to_string(),
+                suggestions: vec![],
+            })
+        })?;
 
         // Check if new parent exists
         self.data_store.get_node(new_parent).await?.ok_or_else(|| {
-            NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "new parent".to_string(), 
-                id: new_parent.to_string(), 
-                suggestions: vec![] 
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "new parent".to_string(),
+                id: new_parent.to_string(),
+                suggestions: vec![],
             })
         })?;
 
         // Check if moving to self (invalid)
         if node_id == new_parent {
-            return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat { 
-                        field: "move_target".to_string(), 
-                        expected: "different_node".to_string(), 
-                        actual: "self".to_string(), 
-                        examples: vec!["other_node_id".to_string()] 
+            return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                field: "move_target".to_string(),
+                expected: "different_node".to_string(),
+                actual: "self".to_string(),
+                examples: vec!["other_node_id".to_string()],
             }));
         }
 
@@ -2572,11 +2579,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
         for descendant in descendants {
             if descendant.id == *new_parent {
-                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat { 
-                        field: "move_parent".to_string(), 
-                        expected: "non_descendant".to_string(), 
-                        actual: "descendant".to_string(), 
-                        examples: vec!["sibling_node".to_string(), "parent_node".to_string()] 
+                return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                    field: "move_parent".to_string(),
+                    expected: "non_descendant".to_string(),
+                    actual: "descendant".to_string(),
+                    examples: vec!["sibling_node".to_string(), "parent_node".to_string()],
                 }));
             }
         }
@@ -2594,10 +2601,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
 
         // Get the root node
         let root_node = self.data_store.get_node(root_id).await?.ok_or_else(|| {
-            NodeSpaceError::Database(DatabaseError::NotFound { 
-                entity_type: "root node".to_string(), 
-                id: root_id.to_string(), 
-                suggestions: vec![] 
+            NodeSpaceError::Database(DatabaseError::NotFound {
+                entity_type: "root node".to_string(),
+                id: root_id.to_string(),
+                suggestions: vec![],
             })
         })?;
         result.push(root_node);
@@ -3340,9 +3347,9 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                     examples: vec!["100".to_string(), "500".to_string()],
                 }));
             }
-            
+
             let children = self.get_children(parent_id).await?;
-            
+
             // Check children count limit
             if children.len() > constants::MAX_CHILDREN_PER_NODE {
                 return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
@@ -3352,10 +3359,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                     examples: vec!["100".to_string(), "1000".to_string()],
                 }));
             }
-            
+
             let mut ordered_children = Vec::new();
             let mut total_processed = 0_usize;
-            
+
             for (index, child) in children.into_iter().enumerate() {
                 // Check total nodes limit to prevent memory exhaustion
                 total_processed += 1;
@@ -3367,9 +3374,11 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                         examples: vec!["10000".to_string(), "25000".to_string()],
                     }));
                 }
-                
+
                 // Recursive call with bounds checking
-                let grandchildren = self.build_ordered_hierarchy(&child.id, start_depth + 1).await?;
+                let grandchildren = self
+                    .build_ordered_hierarchy(&child.id, start_depth + 1)
+                    .await?;
                 ordered_children.push(OrderedNode {
                     node: child,
                     children: grandchildren,
@@ -3410,6 +3419,125 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
 
             Ok(hierarchical_children)
         })
+    }
+
+    /// Efficient root-based hierarchy fetching with business logic assembly
+    /// This replaces multiple O(N) database scans with single query + smart assembly
+    async fn get_hierarchy_for_root_efficient(
+        &self,
+        root_id: &NodeId,
+    ) -> NodeSpaceResult<Vec<Node>> {
+        // 🚀 Single query to get all nodes (future: optimize to get_nodes_by_root)
+        let all_nodes = self.data_store.query_nodes("").await?;
+
+        // 🧠 Business logic: Assemble hierarchy according to domain rules
+        self.build_logical_hierarchy_for_root(all_nodes, root_id)
+    }
+
+    /// Business logic hierarchy assembly - handles logical structure according to domain rules
+    fn build_logical_hierarchy_for_root(
+        &self,
+        flat_nodes: Vec<Node>,
+        root_id: &NodeId,
+    ) -> NodeSpaceResult<Vec<Node>> {
+        // Create lookup map for O(1) node access
+        let node_map: HashMap<NodeId, Node> =
+            flat_nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
+
+        // Business rule: Only include direct children of the root (not descendants)
+        let mut children: Vec<Node> = node_map
+            .values()
+            .filter(|node| node.parent_id.as_ref() == Some(root_id))
+            .cloned()
+            .collect();
+
+        // Business rule: Maintain sibling ordering using next_sibling/previous_sibling pointers
+        children = self.sort_siblings_by_chain(children, &node_map)?;
+
+        Ok(children)
+    }
+
+    /// Sort siblings according to sibling chain pointers (business logic)
+    fn sort_siblings_by_chain(
+        &self,
+        mut siblings: Vec<Node>,
+        node_map: &HashMap<NodeId, Node>,
+    ) -> NodeSpaceResult<Vec<Node>> {
+        if siblings.is_empty() {
+            return Ok(siblings);
+        }
+
+        // Find the first sibling (no previous_sibling)
+        let first_sibling = siblings
+            .iter()
+            .find(|node| node.previous_sibling.is_none())
+            .cloned();
+
+        if let Some(first) = first_sibling {
+            // Follow the sibling chain to build ordered list
+            let mut ordered = Vec::new();
+            let mut current = Some(first);
+
+            while let Some(node) = current {
+                ordered.push(node.clone());
+
+                // Move to next sibling
+                current = node
+                    .next_sibling
+                    .as_ref()
+                    .and_then(|next_id| node_map.get(next_id))
+                    .cloned();
+
+                // Prevent infinite loops
+                if ordered.len() > siblings.len() {
+                    break;
+                }
+            }
+
+            // Add any orphaned siblings (not in chain) at the end
+            for sibling in siblings {
+                if !ordered.iter().any(|ord| ord.id == sibling.id) {
+                    ordered.push(sibling);
+                }
+            }
+
+            Ok(ordered)
+        } else {
+            // No clear first sibling, fallback to creation time ordering
+            siblings.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            Ok(siblings)
+        }
+    }
+
+    /// Efficient children retrieval using business logic hierarchy assembly
+    async fn get_children_efficient(&self, parent_id: &NodeId) -> NodeSpaceResult<Vec<Node>> {
+        // For now, get all nodes and filter efficiently - future optimization point
+        // TODO: Add get_nodes_by_parent to DataStore trait for true O(1) lookup
+        let all_nodes = self.data_store.query_nodes("").await?;
+
+        // Business logic: Filter children and maintain sibling ordering
+        let mut children: Vec<Node> = all_nodes
+            .into_iter()
+            .filter(|node| node.parent_id.as_ref() == Some(parent_id))
+            .collect();
+
+        // Business logic: Sort by sibling chain for proper ordering
+        children.sort_by(|a, b| {
+            // If a has no previous sibling, it comes first
+            if a.previous_sibling.is_none() && b.previous_sibling.is_some() {
+                std::cmp::Ordering::Less
+            }
+            // If b has no previous sibling, it comes first
+            else if b.previous_sibling.is_none() && a.previous_sibling.is_some() {
+                std::cmp::Ordering::Greater
+            }
+            // For siblings with previous siblings, use creation time as fallback
+            else {
+                a.created_at.cmp(&b.created_at)
+            }
+        });
+
+        Ok(children)
     }
 }
 

@@ -111,7 +111,7 @@ fn get_sample_content_lines() -> Vec<(String, u32)> {
     vec![
         ("Product Launch Campaign Strategy".to_string(), 1),
         ("This comprehensive product launch plan provides the strategic framework, tactical execution details, and success measurement criteria necessary for achieving market leadership in the sustainable professional products category.".to_string(), 2),
-        
+
         ("Launch Overview".to_string(), 2),
         ("Product: EcoSmart Professional Series".to_string(), 3),
         ("Launch Date: July 15, 2025".to_string(), 3),
@@ -130,7 +130,7 @@ fn get_sample_content_lines() -> Vec<(String, u32)> {
         ("Education: College degree or higher (87%)".to_string(), 5),
         ("Location: Urban and suburban professionals in major metropolitan areas".to_string(), 5),
         ("Industry Focus: Design, consulting, technology, finance, healthcare".to_string(), 5),
-        
+
         ("Psychographic Profile:".to_string(), 4),
         ("Values sustainability and environmental responsibility".to_string(), 5),
         ("Willing to pay premium for quality and environmental benefits".to_string(), 5),

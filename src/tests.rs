@@ -1,16 +1,17 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        constants, CoreLogic, HierarchyComputation, NodeSpaceConfig,
-        NodeSpaceService, OfflineFallback, ServiceState,
+        constants, CoreLogic, HierarchyComputation, NodeSpaceConfig, NodeSpaceService,
+        OfflineFallback, ServiceState,
     };
     use async_trait::async_trait;
-    use nodespace_core_types::{DatabaseError, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError};
+    use nodespace_core_types::{
+        DatabaseError, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError,
+    };
     use nodespace_data_store::{
         DataStore, HybridSearchConfig as DataStoreHybridSearchConfig,
         ImageNode as DataStoreImageNode, MultiLevelEmbeddings as DataStoreMultiLevelEmbeddings,
-        NodeType as DataStoreNodeType, QueryEmbeddings,
-        SearchResult as DataStoreSearchResult,
+        NodeType as DataStoreNodeType, QueryEmbeddings, SearchResult as DataStoreSearchResult,
     };
     use nodespace_nlp_engine::{ContextStrategy, NodeContext};
     use serde_json::json;
@@ -74,33 +75,35 @@ mod tests {
                 .unwrap()
                 .insert(query.to_string(), nodes);
         }
-        
+
         /// Enhanced query matching for structured queries like "type:date AND date:2024-01-15"
         fn matches_query(&self, node: &Node, query: &str) -> bool {
             // Handle empty query (return all nodes)
             if query.is_empty() {
                 return true;
             }
-            
+
             // Parse structured queries with AND operators
             if query.contains(" AND ") {
                 let conditions: Vec<&str> = query.split(" AND ").collect();
-                return conditions.iter().all(|condition| self.matches_single_condition(node, condition));
+                return conditions
+                    .iter()
+                    .all(|condition| self.matches_single_condition(node, condition));
             }
-            
+
             // Single condition
             self.matches_single_condition(node, query)
         }
-        
+
         /// Match a single query condition like "type:date" or "date:2024-01-15"
         fn matches_single_condition(&self, node: &Node, condition: &str) -> bool {
             let condition = condition.trim();
-            
+
             // Handle field:value queries
             if let Some(colon_pos) = condition.find(':') {
                 let field = &condition[..colon_pos];
                 let value = &condition[colon_pos + 1..];
-                
+
                 match field {
                     "type" => {
                         // Check node.content.type field
@@ -505,7 +508,10 @@ mod tests {
             let summary = if let Some(max_len) = max_length {
                 content.chars().take(max_len).collect()
             } else {
-                format!("Summary of: {}", content.chars().take(50).collect::<String>())
+                format!(
+                    "Summary of: {}",
+                    content.chars().take(50).collect::<String>()
+                )
             };
             Ok(summary)
         }
@@ -634,8 +640,13 @@ mod tests {
         NodeSpaceService::new(MockDataStore::new(), MockNLPEngine::new())
     }
 
-    fn create_test_service_with_failure(failure_mode: &str) -> NodeSpaceService<MockDataStore, MockNLPEngine> {
-        NodeSpaceService::new(MockDataStore::with_failure_mode(failure_mode), MockNLPEngine::new())
+    fn create_test_service_with_failure(
+        failure_mode: &str,
+    ) -> NodeSpaceService<MockDataStore, MockNLPEngine> {
+        NodeSpaceService::new(
+            MockDataStore::with_failure_mode(failure_mode),
+            MockNLPEngine::new(),
+        )
     }
 
     #[tokio::test]
@@ -1001,352 +1012,418 @@ mod tests {
     }
 
     // ===== COMPREHENSIVE DATE-AWARE TESTS =====
-    
+
     #[tokio::test]
     async fn test_create_node_for_date_basic() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
         let content = "Test content for today";
-        
-        let node_id = service.create_node_for_date(
-            today,
-            content,
-            nodespace_data_store::NodeType::Text,
-            Some(json!({"test": true}))
-        ).await.unwrap();
-        
+
+        let node_id = service
+            .create_node_for_date(
+                today,
+                content,
+                nodespace_data_store::NodeType::Text,
+                Some(json!({"test": true})),
+            )
+            .await
+            .unwrap();
+
         // Verify node was created
-        let node = service.data_store.get_node(&node_id).await.unwrap().unwrap();
+        let node = service
+            .data_store
+            .get_node(&node_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(node.content.as_str().unwrap(), content);
-        
+
         // Verify date node was created
         let date_node_id = service.find_date_node(today).await.unwrap().unwrap();
         assert_eq!(node.parent_id.unwrap(), date_node_id);
     }
-    
+
     #[tokio::test]
     async fn test_create_node_for_date_sibling_ordering() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // Create first node
-        let node1_id = service.create_node_for_date(
-            today,
-            "First node",
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
+        let node1_id = service
+            .create_node_for_date(
+                today,
+                "First node",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
         // Create second node
-        let node2_id = service.create_node_for_date(
-            today,
-            "Second node", 
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
+        let node2_id = service
+            .create_node_for_date(
+                today,
+                "Second node",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
         // Verify sibling ordering
-        let node1 = service.data_store.get_node(&node1_id).await.unwrap().unwrap();
-        let node2 = service.data_store.get_node(&node2_id).await.unwrap().unwrap();
-        
+        let node1 = service
+            .data_store
+            .get_node(&node1_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let node2 = service
+            .data_store
+            .get_node(&node2_id)
+            .await
+            .unwrap()
+            .unwrap();
+
         // First node should point to second as next sibling
         assert_eq!(node1.next_sibling.unwrap(), node2_id);
         assert!(node1.previous_sibling.is_none());
-        
+
         // Second node should point to first as previous sibling
         assert_eq!(node2.previous_sibling.unwrap(), node1_id);
         assert!(node2.next_sibling.is_none());
     }
-    
+
     #[tokio::test]
     async fn test_create_node_for_date_invalid_date() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         // Test with future date beyond reasonable limits
         let far_future = chrono::NaiveDate::from_ymd_opt(2200, 1, 1).unwrap();
-        
-        let result = service.create_node_for_date(
-            far_future,
-            "Future content",
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await;
-        
+
+        let result = service
+            .create_node_for_date(
+                far_future,
+                "Future content",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await;
+
         // Should succeed - dates are valid for storage
         assert!(result.is_ok());
     }
-    
+
     #[tokio::test]
     async fn test_get_nodes_for_date_empty() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
         let nodes = service.get_nodes_for_date(today).await.unwrap();
-        
+
         // Should return empty for date with no content
         assert!(nodes.is_empty());
     }
-    
-    #[tokio::test] 
+
+    #[tokio::test]
     async fn test_get_nodes_for_date_with_content() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // Create nodes for today
-        let _node1_id = service.create_node_for_date(
-            today,
-            "Content 1",
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
-        let _node2_id = service.create_node_for_date(
-            today,
-            "Content 2", 
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
+        let _node1_id = service
+            .create_node_for_date(
+                today,
+                "Content 1",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let _node2_id = service
+            .create_node_for_date(
+                today,
+                "Content 2",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
         let nodes = service.get_nodes_for_date(today).await.unwrap();
         assert_eq!(nodes.len(), 2);
-        
+
         // Verify content
-        let contents: Vec<&str> = nodes.iter()
-            .map(|n| n.content.as_str().unwrap())
-            .collect();
+        let contents: Vec<&str> = nodes.iter().map(|n| n.content.as_str().unwrap()).collect();
         assert!(contents.contains(&"Content 1"));
         assert!(contents.contains(&"Content 2"));
     }
-    
+
     #[tokio::test]
     async fn test_navigate_to_date_empty() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
         let yesterday = today - chrono::Duration::days(1);
         let tomorrow = today + chrono::Duration::days(1);
-        
+
         let result = service.navigate_to_date(today).await.unwrap();
-        
+
         assert_eq!(result.date, today);
         assert!(result.nodes.is_empty());
         assert!(!result.has_previous); // No content on any day yet
         assert!(!result.has_next);
     }
-    
+
     #[tokio::test]
     async fn test_navigate_to_date_with_adjacent_content() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
         let yesterday = today - chrono::Duration::days(1);
         let tomorrow = today + chrono::Duration::days(1);
-        
+
         // Create content for all three days
-        let _yesterday_node = service.create_node_for_date(
-            yesterday,
-            "Yesterday content",
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
-        let _today_node = service.create_node_for_date(
-            today,
-            "Today content", 
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
-        let _tomorrow_node = service.create_node_for_date(
-            tomorrow,
-            "Tomorrow content",
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
+        let _yesterday_node = service
+            .create_node_for_date(
+                yesterday,
+                "Yesterday content",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let _today_node = service
+            .create_node_for_date(
+                today,
+                "Today content",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let _tomorrow_node = service
+            .create_node_for_date(
+                tomorrow,
+                "Tomorrow content",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
         let result = service.navigate_to_date(today).await.unwrap();
-        
+
         assert_eq!(result.date, today);
         assert_eq!(result.nodes.len(), 1);
         assert!(result.has_previous);
         assert!(result.has_next);
     }
-    
+
     #[tokio::test]
     async fn test_find_date_node_nonexistent() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let date = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
         let result = service.find_date_node(date).await.unwrap();
-        
+
         assert!(result.is_none());
     }
-    
+
     #[tokio::test]
     async fn test_find_date_node_existing() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // Create a date node
         let date_node_id = service.ensure_date_node_exists(today).await.unwrap();
-        
+
         // Find it
         let found_id = service.find_date_node(today).await.unwrap().unwrap();
         assert_eq!(found_id, date_node_id);
     }
-    
+
     #[tokio::test]
     async fn test_mock_query_debugging() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        
+
         // Create a date node manually and check if we can find it
         let date_node_id = service.ensure_date_node_exists(today).await.unwrap();
         println!("Created date node: {}", date_node_id);
-        
+
         // Check what the date node looks like
-        let created_node = service.data_store.get_node(&date_node_id).await.unwrap().unwrap();
+        let created_node = service
+            .data_store
+            .get_node(&date_node_id)
+            .await
+            .unwrap()
+            .unwrap();
         println!("Date node content: {:?}", created_node.content);
         println!("Date node metadata: {:?}", created_node.metadata);
-        
+
         // Try to find it with our query
         let query = format!("type:date AND date:{}", today.format("%Y-%m-%d"));
         println!("Query: {}", query);
         let found_nodes = service.data_store.query_nodes(&query).await.unwrap();
         println!("Found {} nodes with query", found_nodes.len());
-        
+
         // Try basic query parts
         let type_query = "type:date";
         let type_results = service.data_store.query_nodes(type_query).await.unwrap();
         println!("Found {} nodes with type:date", type_results.len());
-        
+
         let date_query = format!("date:{}", today.format("%Y-%m-%d"));
         let date_results = service.data_store.query_nodes(&date_query).await.unwrap();
         println!("Found {} nodes with date query", date_results.len());
     }
-    
+
     #[tokio::test]
     async fn test_ensure_date_node_exists_create() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // First call should create
         let node_id1 = service.ensure_date_node_exists(today).await.unwrap();
-        
+
         // Second call should return same ID
         let node_id2 = service.ensure_date_node_exists(today).await.unwrap();
         assert_eq!(node_id1, node_id2);
-        
+
         // Verify node structure
-        let node = service.data_store.get_node(&node_id1).await.unwrap().unwrap();
+        let node = service
+            .data_store
+            .get_node(&node_id1)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(node.content.get("type").unwrap().as_str().unwrap() == "date");
     }
-    
+
     #[tokio::test]
     async fn test_get_nodes_for_date_with_structure_empty() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        let structure = service.get_nodes_for_date_with_structure(today).await.unwrap();
-        
+        let structure = service
+            .get_nodes_for_date_with_structure(today)
+            .await
+            .unwrap();
+
         // Should create date node but have no children
         assert!(structure.children.is_empty());
         assert!(!structure.has_content);
         assert_eq!(structure.date_node.content.get("type").unwrap(), "date");
     }
-    
+
     #[tokio::test]
     async fn test_get_nodes_for_date_with_structure_hierarchical() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // Create parent and child nodes
-        let parent_id = service.create_node_for_date(
-            today,
-            "Parent content",
-            nodespace_data_store::NodeType::Text,
-            None
-        ).await.unwrap();
-        
+        let parent_id = service
+            .create_node_for_date(
+                today,
+                "Parent content",
+                nodespace_data_store::NodeType::Text,
+                None,
+            )
+            .await
+            .unwrap();
+
         // Create child node manually to test hierarchy
         let mut child_node = create_test_node("child1", "Child content");
         child_node.parent_id = Some(parent_id.clone());
         service.data_store.add_node(child_node);
-        
-        let structure = service.get_nodes_for_date_with_structure(today).await.unwrap();
-        
+
+        let structure = service
+            .get_nodes_for_date_with_structure(today)
+            .await
+            .unwrap();
+
         assert_eq!(structure.children.len(), 1);
         assert!(structure.has_content);
-        
+
         // Verify hierarchical structure
         let parent_ordered = &structure.children[0];
-        assert_eq!(parent_ordered.node.content.as_str().unwrap(), "Parent content");
+        assert_eq!(
+            parent_ordered.node.content.as_str().unwrap(),
+            "Parent content"
+        );
         assert_eq!(parent_ordered.children.len(), 1);
-        assert_eq!(parent_ordered.children[0].node.content.as_str().unwrap(), "Child content");
+        assert_eq!(
+            parent_ordered.children[0].node.content.as_str().unwrap(),
+            "Child content"
+        );
     }
-    
+
     // ===== RACE CONDITION TESTS =====
-    
+
     #[tokio::test]
     async fn test_concurrent_sibling_creation() {
         let service = std::sync::Arc::new(create_test_service());
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // Create multiple nodes concurrently for the same date
         let mut handles = vec![];
         for i in 0..5 {
             let service_clone = service.clone();
             let handle = tokio::spawn(async move {
-                service_clone.create_node_for_date(
-                    today,
-                    &format!("Concurrent node {}", i),
-                    nodespace_data_store::NodeType::Text,
-                    None
-                ).await
+                service_clone
+                    .create_node_for_date(
+                        today,
+                        &format!("Concurrent node {}", i),
+                        nodespace_data_store::NodeType::Text,
+                        None,
+                    )
+                    .await
             });
             handles.push(handle);
         }
-        
+
         // Wait for all to complete
         let mut node_ids = vec![];
         for handle in handles {
             let node_id = handle.await.unwrap().unwrap();
             node_ids.push(node_id);
         }
-        
+
         // Verify all nodes were created
         assert_eq!(node_ids.len(), 5);
-        
+
         // Verify sibling chain integrity
         let nodes = service.get_nodes_for_date(today).await.unwrap();
         assert_eq!(nodes.len(), 5);
-        
+
         // Check that sibling pointers form a valid chain
         let mut current_id = None;
         let mut visited_count = 0;
-        
+
         // Find the first node (no previous sibling)
         for node in &nodes {
             if node.previous_sibling.is_none() {
@@ -1354,94 +1431,106 @@ mod tests {
                 break;
             }
         }
-        
+
         // Traverse the chain
         while let Some(id) = current_id {
             visited_count += 1;
-            if visited_count > 10 { // Prevent infinite loops
+            if visited_count > 10 {
+                // Prevent infinite loops
                 panic!("Sibling chain contains cycle or is too long");
             }
-            
+
             let node = service.data_store.get_node(&id).await.unwrap().unwrap();
             current_id = node.next_sibling;
         }
-        
+
         // Should have visited all nodes exactly once
         assert_eq!(visited_count, 5);
     }
-    
+
     #[tokio::test]
     async fn test_concurrent_date_node_creation() {
         let service = std::sync::Arc::new(create_test_service());
         service.initialize().await.unwrap();
-        
+
         let today = chrono::Utc::now().date_naive();
-        
+
         // Try to create the same date node concurrently
         let mut handles = vec![];
         for _ in 0..3 {
             let service_clone = service.clone();
-            let handle = tokio::spawn(async move {
-                service_clone.ensure_date_node_exists(today).await
-            });
+            let handle =
+                tokio::spawn(async move { service_clone.ensure_date_node_exists(today).await });
             handles.push(handle);
         }
-        
+
         // Wait for all to complete
         let mut date_node_ids = vec![];
         for handle in handles {
             let date_node_id = handle.await.unwrap().unwrap();
             date_node_ids.push(date_node_id);
         }
-        
+
         // All should return the same date node ID (idempotent)
         assert_eq!(date_node_ids.len(), 3);
         assert_eq!(date_node_ids[0], date_node_ids[1]);
         assert_eq!(date_node_ids[1], date_node_ids[2]);
     }
-    
+
     // ===== INTEGRATION TESTS =====
-    
+
     #[tokio::test]
     async fn test_end_to_end_date_navigation_workflow() {
         let service = create_test_service();
         service.initialize().await.unwrap();
-        
+
         let base_date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        
+
         // Create content across multiple days
         for day_offset in 0..7 {
             let date = base_date + chrono::Duration::days(day_offset);
-            
+
             for item in 0..2 {
-                service.create_node_for_date(
-                    date,
-                    &format!("Day {} item {}", day_offset + 1, item + 1),
-                    nodespace_data_store::NodeType::Text,
-                    Some(json!({"day": day_offset + 1, "item": item + 1}))
-                ).await.unwrap();
+                service
+                    .create_node_for_date(
+                        date,
+                        &format!("Day {} item {}", day_offset + 1, item + 1),
+                        nodespace_data_store::NodeType::Text,
+                        Some(json!({"day": day_offset + 1, "item": item + 1})),
+                    )
+                    .await
+                    .unwrap();
             }
         }
-        
+
         // Test navigation on middle day
         let middle_date = base_date + chrono::Duration::days(3);
         let nav_result = service.navigate_to_date(middle_date).await.unwrap();
-        
+
         assert_eq!(nav_result.date, middle_date);
         assert_eq!(nav_result.nodes.len(), 2); // Two items for this day
         assert!(nav_result.has_previous); // Days before exist
         assert!(nav_result.has_next); // Days after exist
-        
+
         // Test full structure
-        let structure = service.get_nodes_for_date_with_structure(middle_date).await.unwrap();
+        let structure = service
+            .get_nodes_for_date_with_structure(middle_date)
+            .await
+            .unwrap();
         assert!(structure.has_content);
         assert_eq!(structure.children.len(), 2);
-        
+
         // Verify sibling ordering within the day
         let first_child = &structure.children[0];
         let second_child = &structure.children[1];
-        assert_eq!(first_child.node.next_sibling, Some(second_child.node.id.clone()));
-        assert_eq!(second_child.node.previous_sibling, Some(first_child.node.id.clone()));
+        assert_eq!(
+            first_child.node.next_sibling,
+            Some(second_child.node.id.clone())
+        );
+        assert_eq!(
+            second_child.node.previous_sibling,
+            Some(first_child.node.id.clone())
+        );
     }
 
     #[tokio::test]
@@ -2119,7 +2208,10 @@ mod tests {
         service.data_store.add_node(node2);
 
         // Test the hierarchical API
-        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+        let result = service
+            .get_hierarchical_nodes_for_date(test_date)
+            .await
+            .unwrap();
 
         // Verify structure
         assert_eq!(result.date_node.id, date_node_id);
@@ -2157,7 +2249,10 @@ mod tests {
         service.data_store.add_node(child_node);
 
         // Test hierarchical structure
-        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+        let result = service
+            .get_hierarchical_nodes_for_date(test_date)
+            .await
+            .unwrap();
 
         assert_eq!(result.total_count, 2); // Parent + child
         assert!(result.has_content);
@@ -2181,7 +2276,10 @@ mod tests {
         let empty_date = chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
 
         // Test with date that has no nodes
-        let result = service.get_hierarchical_nodes_for_date(empty_date).await.unwrap();
+        let result = service
+            .get_hierarchical_nodes_for_date(empty_date)
+            .await
+            .unwrap();
 
         assert_eq!(result.total_count, 0);
         assert!(!result.has_content);
@@ -2204,7 +2302,10 @@ mod tests {
         }
 
         let start = std::time::Instant::now();
-        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+        let result = service
+            .get_hierarchical_nodes_for_date(test_date)
+            .await
+            .unwrap();
         let duration = start.elapsed();
 
         // Verify results
@@ -2213,7 +2314,11 @@ mod tests {
         assert_eq!(result.children.len(), 50);
 
         // Performance assertion (should be much faster than O(N) scan)
-        assert!(duration.as_millis() < 100, "Hierarchical lookup took too long: {:?}", duration);
+        assert!(
+            duration.as_millis() < 100,
+            "Hierarchical lookup took too long: {:?}",
+            duration
+        );
     }
 
     #[tokio::test]
@@ -2248,7 +2353,10 @@ mod tests {
         node2.parent_id = Some(date_node_id.clone());
         service.data_store.add_node(node2);
 
-        let result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+        let result = service
+            .get_hierarchical_nodes_for_date(test_date)
+            .await
+            .unwrap();
 
         // Verify sibling indexing
         assert_eq!(result.children.len(), 2);
@@ -2273,7 +2381,10 @@ mod tests {
 
         // Get results from both APIs
         let flat_nodes = service.get_nodes_for_date(test_date).await.unwrap();
-        let hierarchical_result = service.get_hierarchical_nodes_for_date(test_date).await.unwrap();
+        let hierarchical_result = service
+            .get_hierarchical_nodes_for_date(test_date)
+            .await
+            .unwrap();
 
         // Verify consistency
         assert_eq!(flat_nodes.len(), hierarchical_result.total_count);
@@ -2287,8 +2398,11 @@ mod tests {
             .collect();
 
         for flat_node in &flat_nodes {
-            assert!(hierarchical_node_ids.contains(&flat_node.id), 
-                "Node {} missing from hierarchical result", flat_node.id);
+            assert!(
+                hierarchical_node_ids.contains(&flat_node.id),
+                "Node {} missing from hierarchical result",
+                flat_node.id
+            );
         }
     }
 }
