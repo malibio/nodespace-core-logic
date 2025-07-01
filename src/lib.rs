@@ -2128,7 +2128,6 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
 }
 
 /// Legacy CoreLogic interface for backward compatibility
-
 /// Hierarchy computation implementation for NodeSpaceService
 #[async_trait]
 impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputation
@@ -2641,7 +2640,7 @@ fn build_parent_children_index(all_nodes: &[Node]) -> HashMap<NodeId, Vec<Node>>
         if let Some(parent_id) = &node.parent_id {
             parent_to_children
                 .entry(parent_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(node.clone());
         }
     }
