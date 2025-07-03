@@ -48,16 +48,7 @@ name = "populate_from_json"
 name = "count_all_nodes"
 
 [[example]]
-name = "populate_with_sibling_order"
-
-[[example]]
-name = "verify_sibling_order"
-
-[[example]]
 name = "search_description"
-
-[[example]]
-name = "show_sibling_column"
 
 [[example]]
 name = "test_real_ollama"

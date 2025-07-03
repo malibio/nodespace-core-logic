@@ -1,10 +1,10 @@
 //! Test desktop integration enhanced APIs
-//! 
+//!
 //! This example demonstrates the unified node management and enhanced query
 //! responses required for desktop app AIChatNode integration.
 
 use chrono::NaiveDate;
-use nodespace_core_logic::{NodeSpaceService, EnhancedQueryResponse};
+use nodespace_core_logic::{EnhancedQueryResponse, NodeSpaceService};
 use nodespace_core_types::NodeId;
 use serde_json::json;
 use tokio;
@@ -22,22 +22,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "./test_data/desktop_integration",
         Some("http://localhost:11434"),
         Some("gemma3:12b"),
-    ).await?;
+    )
+    .await?;
 
     let today = chrono::Utc::now().date_naive();
 
     // Test 1: Upsert TextNode
     println!("\n📝 Test 1: Upserting text nodes");
     let text_node_id = NodeId::new();
-    service.upsert_node(
-        text_node_id.clone(),
-        today,
-        "NodeSpace is a knowledge management system built with Rust".to_string(),
-        None, // Root node
-        None, // First sibling
-        "text".to_string(),
-        None, // No metadata for text nodes
-    ).await?;
+    service
+        .upsert_node(
+            text_node_id.clone(),
+            today,
+            "NodeSpace is a knowledge management system built with Rust".to_string(),
+            None, // Root node
+            None, // First sibling
+            "text".to_string(),
+            None, // No metadata for text nodes
+        )
+        .await?;
     println!("   ✅ Text node created: {}", text_node_id.as_str());
 
     // Test 2: Upsert AIChatNode with rich metadata
@@ -52,47 +55,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "overall_confidence": 0.87,
         "node_sources": []
     });
-    
-    service.upsert_node(
-        chat_node_id.clone(),
-        today,
-        "Chat: What is NodeSpace?".to_string(), // Only title gets embedded
-        None, // Root node
-        Some(text_node_id.clone()), // After the text node
-        "ai-chat".to_string(),
-        Some(ai_chat_metadata),
-    ).await?;
+
+    service
+        .upsert_node(
+            chat_node_id.clone(),
+            today,
+            "Chat: What is NodeSpace?".to_string(), // Only title gets embedded
+            None,                                   // Root node
+            Some(text_node_id.clone()),             // After the text node
+            "ai-chat".to_string(),
+            Some(ai_chat_metadata),
+        )
+        .await?;
     println!("   ✅ AI chat node created: {}", chat_node_id.as_str());
 
     // Test 3: Update existing node (idempotent upsert)
     println!("\n🔄 Test 3: Updating existing node");
-    service.upsert_node(
-        text_node_id.clone(),
-        today,
-        "NodeSpace is a powerful knowledge management system built with Rust and AI".to_string(),
-        None,
-        None,
-        "text".to_string(),
-        None,
-    ).await?;
+    service
+        .upsert_node(
+            text_node_id.clone(),
+            today,
+            "NodeSpace is a powerful knowledge management system built with Rust and AI"
+                .to_string(),
+            None,
+            None,
+            "text".to_string(),
+            None,
+        )
+        .await?;
     println!("   ✅ Text node updated successfully");
 
     // Test 4: Enhanced query processing
     println!("\n🔍 Test 4: Enhanced query processing");
-    let query_response: EnhancedQueryResponse = service.process_query_enhanced(
-        "What is NodeSpace and how is it built?".to_string()
-    ).await?;
+    let query_response: EnhancedQueryResponse = service
+        .process_query_enhanced("What is NodeSpace and how is it built?".to_string())
+        .await?;
 
     println!("   📝 Answer: {}", query_response.answer);
     println!("   📊 Confidence: {:.2}", query_response.confidence);
-    println!("   ⏱️  Generation time: {}ms", query_response.generation_time_ms);
+    println!(
+        "   ⏱️  Generation time: {}ms",
+        query_response.generation_time_ms
+    );
     println!("   📚 Sources found: {}", query_response.sources.len());
 
     for (i, source) in query_response.sources.iter().enumerate() {
-        println!("      {}. Type: {} | Score: {:.3} | Tokens: {}", 
-                 i + 1, source.node_type, source.retrieval_score, source.context_tokens);
-        println!("         Content: {}", 
-                 source.content.chars().take(80).collect::<String>());
+        println!(
+            "      {}. Type: {} | Score: {:.3} | Tokens: {}",
+            i + 1,
+            source.node_type,
+            source.retrieval_score,
+            source.context_tokens
+        );
+        println!(
+            "         Content: {}",
+            source.content.chars().take(80).collect::<String>()
+        );
     }
 
     // Test 5: Vector embedding control verification

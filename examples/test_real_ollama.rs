@@ -1,7 +1,4 @@
 //! Test real Ollama integration with NodeSpace core logic
-//!
-//! This example demonstrates the REAL AI functionality required by NS-127.
-//! It tests the actual Ollama HTTP client integration for text generation.
 
 use chrono::NaiveDate;
 use nodespace_core_logic::{CoreLogic, NodeSpaceService};

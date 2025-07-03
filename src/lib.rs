@@ -1268,8 +1268,7 @@ impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine
         Self::create_with_paths(database_path, Some(model_directory)).await
     }
 
-    /// Factory method with REAL Ollama NLP engine integration
-    /// This enables actual AI text generation using Ollama HTTP client
+    /// Factory method with real Ollama NLP engine integration
     pub async fn create_with_real_ollama(
         database_path: &str,
         ollama_base_url: Option<&str>,
@@ -1281,13 +1280,10 @@ impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine
             ModelConfigs, NLPConfig, OllamaConfig, PerformanceConfig, TextGenerationModelConfig,
         };
 
-        // Store values for logging before creating config
         let base_url = ollama_base_url
             .unwrap_or("http://localhost:11434")
             .to_string();
         let model_name = ollama_model.unwrap_or("gemma3:12b").to_string();
-
-        // Configure NLP engine with real Ollama integration
         let ollama_config = OllamaConfig {
             base_url: base_url.clone(),
             default_model: model_name.clone(),
@@ -2189,7 +2185,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         })?;
 
         // Update the dedicated parent_id field in the Node schema
-        node.parent_id = parent_id.map(|id| id.clone());
+        node.parent_id = parent_id.cloned();
         self.data_store.update_node(node).await?;
         Ok(())
     }
@@ -2210,7 +2206,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         self.data_store.delete_node(node_id).await?;
 
         // 3. Invalidate hierarchy cache after structural change
-        let _ = self.invalidate_hierarchy_cache();
+        let _invalidate_future = self.invalidate_hierarchy_cache();
 
         Ok(())
     }
@@ -2914,7 +2910,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         // Sibling ordering using before_sibling_id approach
         if let Some(before_sibling_id_val) = &before_sibling_id {
             // Validate before sibling exists and has the same parent
-            if let Some(before_sibling) = self.data_store.get_node(&before_sibling_id_val).await? {
+            if let Some(before_sibling) = self.data_store.get_node(before_sibling_id_val).await? {
                 if before_sibling.parent_id != actual_parent_id {
                     let error = NodeSpaceError::Validation(ValidationError::InvalidFormat {
                         field: "before_sibling_id".to_string(),
@@ -3754,8 +3750,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         }
     }
 
-    /// Generate intelligent AI response using real Ollama integration
-    /// This method implements the REAL AI functionality required by NS-127
+    /// Generate AI response using enhanced text generation with context
     pub async fn generate_ai_response(
         &self,
         query: &str,
