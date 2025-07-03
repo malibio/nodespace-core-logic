@@ -12,9 +12,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+// Desktop integration module for enhanced APIs
+pub mod desktop_integration;
+pub use desktop_integration::{EnhancedQueryResponse, NodeSource};
+
 // Import traits from their respective repositories
 pub use nodespace_data_store::DataStore;
 pub use nodespace_nlp_engine::NLPEngine;
+
+// Import enhanced text generation types
+use nodespace_nlp_engine::{RAGContext, TextGenerationRequest};
 
 // Import additional types for embedding generation bridge
 use nodespace_data_store::DataStoreError;
@@ -69,6 +76,7 @@ pub mod smart_embedding_cache {
         pub content_hash: ContentHash,
         pub parent_hash: Option<ContentHash>,
         pub sibling_hashes: Vec<ContentHash>,
+        pub children_hashes: Vec<ContentHash>,
         pub mention_hashes: Vec<ContentHash>,
         pub strategy: ContextStrategy,
     }
@@ -93,6 +101,7 @@ pub mod smart_embedding_cache {
     pub struct RelationshipFingerprint {
         pub parent_id: Option<NodeId>,
         pub sibling_ids: Vec<NodeId>,
+        pub children_ids: Vec<NodeId>,
         pub mention_ids: Vec<NodeId>,
         pub last_modified: DateTime<Utc>,
     }
@@ -398,8 +407,13 @@ pub mod smart_embedding_cache {
             embedding: Vec<f32>,
             fingerprint: RelationshipFingerprint,
         ) {
-            let entry = CacheEntry::new(embedding, Some(fingerprint));
+            let entry = CacheEntry::new(embedding, Some(fingerprint.clone()));
             self.contextual_cache.insert(context_hash, entry);
+
+            // Store the fingerprint for this node
+            // Note: We need the node_id to track dependencies, but it's not in the fingerprint
+            // This will be handled in the calling function that has access to the node_id
+
             self.update_memory_usage();
         }
 
@@ -704,7 +718,7 @@ pub mod constants {
     /// Default temperature for text generation
     pub const DEFAULT_TEMPERATURE: f32 = 0.7;
     /// Default search limit for semantic search
-    pub const DEFAULT_SEARCH_LIMIT: usize = 5;
+    pub const DEFAULT_SEARCH_LIMIT: usize = 10;
     /// Default search limit for multi-strategy search
     pub const DEFAULT_MULTI_STRATEGY_LIMIT: usize = 20;
     /// Default maximum results per strategy
@@ -768,6 +782,10 @@ pub struct PerformanceConfig {
     pub context_window: Option<usize>,
     /// Temperature for text generation (0.0-1.0)
     pub temperature: Option<f32>,
+    /// Maximum number of siblings to include in contextual embeddings
+    pub max_siblings_context: Option<usize>,
+    /// Maximum number of children to include in contextual embeddings
+    pub max_children_context: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -801,6 +819,8 @@ impl Default for NodeSpaceConfig {
                 max_batch_size: Some(constants::DEFAULT_MAX_BATCH_SIZE),
                 context_window: Some(constants::DEFAULT_CONTEXT_WINDOW),
                 temperature: Some(constants::DEFAULT_TEMPERATURE),
+                max_siblings_context: Some(10), // Enhanced from 3 to 10
+                max_children_context: Some(10), // New feature: children context
             },
             offline_config: OfflineConfig {
                 enable_offline: true,
@@ -931,10 +951,24 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             Vec::new()
         };
 
+        // Get children hashes
+        let children_hashes = {
+            let children = self.get_children(&node.id).await.unwrap_or_default();
+            children
+                .iter()
+                .map(|child| {
+                    smart_embedding_cache::ContentHash::from_content(
+                        child.content.as_str().unwrap_or(""),
+                    )
+                })
+                .collect()
+        };
+
         let context_hash = smart_embedding_cache::ContextHash {
             content_hash: content_hash.clone(),
             parent_hash,
             sibling_hashes,
+            children_hashes,
             mention_hashes: Vec::new(), // TODO: Extract mentions
             strategy: context_strategy,
         };
@@ -968,6 +1002,13 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             } else {
                 Vec::new()
             },
+            children_ids: self
+                .get_children(&node.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|child| child.id)
+                .collect(),
             mention_ids: Vec::new(), // TODO: Extract mentions
             last_modified: Utc::now(),
         };
@@ -975,7 +1016,23 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         // Cache the contextual embedding
         {
             let mut cache = self.embedding_cache.write().await;
-            cache.cache_contextual_embedding(context_hash, embedding.clone(), fingerprint);
+            cache.cache_contextual_embedding(context_hash, embedding.clone(), fingerprint.clone());
+
+            // Track dependencies for cache invalidation
+            // This node's embedding depends on its children - when children change, invalidate this node
+            for child_id in &fingerprint.children_ids {
+                cache.add_dependency(node.id.clone(), child_id.clone());
+            }
+
+            // This node's embedding depends on its siblings - when siblings change, invalidate this node
+            for sibling_id in &fingerprint.sibling_ids {
+                cache.add_dependency(node.id.clone(), sibling_id.clone());
+            }
+
+            // This node's embedding depends on its parent - when parent changes, invalidate this node
+            if let Some(parent_id) = &fingerprint.parent_id {
+                cache.add_dependency(node.id.clone(), parent_id.clone());
+            }
         }
 
         Ok(embedding)
@@ -1011,14 +1068,135 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             let sibling_contents: Vec<String> = siblings
                 .iter()
                 .filter(|sibling| sibling.id != node.id)
-                .take(3) // Limit to 3 siblings for context
+                .take(
+                    self.config
+                        .performance_config
+                        .max_siblings_context
+                        .unwrap_or(10),
+                ) // Configurable sibling limit
                 .filter_map(|sibling| sibling.content.as_str())
                 .map(|content| format!("Sibling: {}", content))
                 .collect();
             contextual_parts.extend(sibling_contents);
         }
 
+        // Add children context (limited to avoid overwhelming)
+        let children = self.get_children(&node.id).await.unwrap_or_default();
+        let children_contents: Vec<String> = children
+            .iter()
+            .take(
+                self.config
+                    .performance_config
+                    .max_children_context
+                    .unwrap_or(10),
+            ) // Configurable children limit
+            .filter_map(|child| child.content.as_str())
+            .map(|content| format!("Child: {}", content))
+            .collect();
+        contextual_parts.extend(children_contents);
+
         Ok(contextual_parts.join("\n"))
+    }
+
+    /// Build FULL hierarchical content for embeddings - includes complete ancestry chain
+    /// This provides much richer semantic context for queries like "Product Launch marketing team"
+    async fn build_hierarchical_content(&self, node: &Node) -> NodeSpaceResult<String> {
+        let mut hierarchical_parts = Vec::new();
+
+        // Get the complete ancestry chain from root to this node
+        // For new nodes, build ancestry from parent instead of trying to look up the node itself
+        let ancestors = if let Some(parent_id) = &node.parent_id {
+            // Look up parent's ancestry and add the parent itself
+            let mut parent_ancestors = self.get_ancestors(parent_id).await.unwrap_or_default();
+            if let Some(parent_node) = self.data_store.get_node(parent_id).await? {
+                parent_ancestors.push(parent_node);
+            }
+            parent_ancestors
+        } else {
+            Vec::new() // Root nodes have no ancestors
+        };
+
+        // Build hierarchical context with full path
+        if !ancestors.is_empty() {
+            // Add each ancestor level with clear hierarchy markers
+            for (level, ancestor) in ancestors.iter().enumerate() {
+                if let Some(content) = ancestor.content.as_str() {
+                    let prefix = match level {
+                        0 => "Root".to_string(),
+                        n => format!("Level {}", n),
+                    };
+                    hierarchical_parts.push(format!("{}: {}", prefix, content));
+                }
+            }
+        }
+
+        // Add the current node's content as the final level
+        if let Some(content) = node.content.as_str() {
+            hierarchical_parts.push(format!("Current: {}", content));
+        }
+
+        // Add sibling context for additional semantic richness
+        if let Some(parent_id) = &node.parent_id {
+            let siblings = self.get_children(parent_id).await.unwrap_or_default();
+            let sibling_contents: Vec<String> = siblings
+                .iter()
+                .filter(|sibling| sibling.id != node.id)
+                .take(
+                    self.config
+                        .performance_config
+                        .max_siblings_context
+                        .unwrap_or(10),
+                ) // Configurable sibling limit
+                .filter_map(|sibling| sibling.content.as_str())
+                .map(|content| format!("Sibling: {}", content))
+                .collect();
+            hierarchical_parts.extend(sibling_contents);
+        }
+
+        // Add children context for comprehensive hierarchical understanding
+        let children = self.get_children(&node.id).await.unwrap_or_default();
+        let children_contents: Vec<String> = children
+            .iter()
+            .take(
+                self.config
+                    .performance_config
+                    .max_children_context
+                    .unwrap_or(10),
+            ) // Configurable children limit
+            .filter_map(|child| child.content.as_str())
+            .map(|content| format!("Child: {}", content))
+            .collect();
+        hierarchical_parts.extend(children_contents);
+
+        Ok(hierarchical_parts.join("\n"))
+    }
+
+    /// Generate embeddings with full hierarchical context and store node
+    /// This is the enhanced version that includes complete ancestry for rich semantic search
+    async fn store_node_with_hierarchical_embedding(&self, node: Node) -> NodeSpaceResult<NodeId> {
+        // Generate the full hierarchical context
+        let hierarchical_content = self.build_hierarchical_content(&node).await?;
+
+        log::info!("🌳 Generating hierarchical embedding for node: {}", node.id);
+        log::info!("📝 Hierarchical context:\n{}", hierarchical_content);
+
+        // Generate embedding using the rich hierarchical context
+        let embedding = self
+            .nlp_engine
+            .generate_embedding(&hierarchical_content)
+            .await?;
+
+        log::info!("✅ Generated embedding with {} dimensions", embedding.len());
+
+        // Store the node with the hierarchical embedding
+        let node_id = self
+            .data_store
+            .store_node_with_embedding(node, embedding)
+            .await?;
+
+        log::info!("💾 Stored node {} with hierarchical embedding", node_id);
+
+        Ok(node_id)
     }
 }
 
@@ -1088,6 +1266,107 @@ impl NodeSpaceService<nodespace_data_store::LanceDataStore, nodespace_nlp_engine
         model_directory: &str,
     ) -> NodeSpaceResult<Self> {
         Self::create_with_paths(database_path, Some(model_directory)).await
+    }
+
+    /// Factory method with REAL Ollama NLP engine integration
+    /// This enables actual AI text generation using Ollama HTTP client
+    pub async fn create_with_real_ollama(
+        database_path: &str,
+        ollama_base_url: Option<&str>,
+        ollama_model: Option<&str>,
+    ) -> NodeSpaceResult<Self> {
+        use nodespace_data_store::LanceDataStore;
+        use nodespace_nlp_engine::{
+            CacheConfig, DeviceConfig, DeviceType, EmbeddingModelConfig, LocalNLPEngine,
+            ModelConfigs, NLPConfig, OllamaConfig, PerformanceConfig, TextGenerationModelConfig,
+        };
+
+        // Store values for logging before creating config
+        let base_url = ollama_base_url
+            .unwrap_or("http://localhost:11434")
+            .to_string();
+        let model_name = ollama_model.unwrap_or("gemma3:12b").to_string();
+
+        // Configure NLP engine with real Ollama integration
+        let ollama_config = OllamaConfig {
+            base_url: base_url.clone(),
+            default_model: model_name.clone(),
+            multimodal_model: model_name.clone(),
+            timeout_secs: 120,
+            max_tokens: 4000,
+            temperature: 0.7,
+            retry_attempts: 3,
+            stream: false,
+        };
+
+        let nlp_config = NLPConfig {
+            models: ModelConfigs {
+                embedding: EmbeddingModelConfig {
+                    model_name: "BAAI/bge-small-en-v1.5".to_string(),
+                    model_path: None,
+                    dimensions: 384,
+                    max_sequence_length: 512,
+                    normalize: true,
+                },
+                text_generation: TextGenerationModelConfig {
+                    model_name: "gemma-3-1b-instruct".to_string(),
+                    model_path: None,
+                    max_context_length: 4096,
+                    default_temperature: 0.7,
+                    default_max_tokens: 2000,
+                    default_top_p: 0.9,
+                },
+                ollama: ollama_config,
+            },
+            device: DeviceConfig {
+                device_type: DeviceType::Auto,
+                gpu_device_id: None,
+                max_memory_gb: None,
+            },
+            cache: CacheConfig {
+                enable_model_cache: true,
+                enable_embedding_cache: true,
+                max_cache_size_mb: 1024,
+                cache_ttl_seconds: 3600,
+            },
+            performance: PerformanceConfig {
+                cpu_threads: None,
+                embedding_batch_size: 32,
+                enable_async_processing: true,
+                pool_size: 4,
+            },
+        };
+
+        // Initialize NLP engine with real Ollama configuration
+        let nlp_engine1 = LocalNLPEngine::with_config(nlp_config.clone());
+        let nlp_engine2 = LocalNLPEngine::with_config(nlp_config);
+
+        // Initialize data store
+        let mut data_store = LanceDataStore::new(database_path).await.map_err(|e| {
+            NodeSpaceError::InternalError {
+                message: format!(
+                    "Failed to initialize data store at '{}': {}",
+                    database_path, e
+                ),
+                service: "core-logic".to_string(),
+            }
+        })?;
+
+        // Set up embedding generator bridge
+        let embedding_adapter = NLPEmbeddingAdapter::new(nlp_engine2);
+        data_store.set_embedding_generator(Box::new(embedding_adapter));
+
+        // Create service with real Ollama configuration
+        let service = Self::new(data_store, nlp_engine1);
+
+        // Initialize the service to load models and establish Ollama connection
+        service.initialize().await?;
+
+        log::info!("✅ NodeSpace service initialized with REAL Ollama integration");
+        log::info!("🤖 Ollama URL: {}", base_url);
+        log::info!("🧠 Default model: {}", model_name);
+
+        Ok(service)
     }
 }
 
@@ -1254,7 +1533,15 @@ pub trait CoreLogic: Send + Sync {
         &self,
         node_id: &NodeId,
         _previous_sibling_id: Option<&NodeId>,
-        next_sibling_id: Option<&NodeId>,
+        before_sibling_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()>;
+
+    /// Delete node with children transfer - supports Core-UI deletion operations
+    async fn delete_node_with_children_transfer(
+        &self,
+        node_id: &NodeId,
+        children_to_reparent: Vec<NodeId>,
+        new_parent_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()>;
 
     /// Batch lookup for multiple node relationships (optimization for N+1 queries)
@@ -1346,6 +1633,12 @@ pub trait HierarchyComputation: Send + Sync {
 
     /// Create a node for a specific date with a provided UUID (fire-and-forget pattern)
     /// This eliminates the virtual node system by accepting UUIDs from the frontend
+    ///
+    /// # Parameters
+    /// - `parent_id`: Optional parent node ID. If None, node becomes direct child of date node.
+    ///   If Some(id), node becomes child of specified parent (hierarchical structure).
+    /// - `before_sibling_id`: Optional before sibling node ID for proper ordering.
+    ///   If Some(id), this node will be placed after the specified sibling.
     async fn create_node_for_date_with_id(
         &self,
         node_id: NodeId,
@@ -1353,6 +1646,8 @@ pub trait HierarchyComputation: Send + Sync {
         content: &str,
         node_type: NodeType,
         metadata: Option<serde_json::Value>,
+        parent_id: Option<NodeId>,
+        before_sibling_id: Option<NodeId>,
     ) -> NodeSpaceResult<()>;
 }
 
@@ -1473,8 +1768,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         node.metadata = Some(metadata);
         node.root_id = Some(node_id.clone());
 
-        // Store the node - data store will automatically generate embeddings using the EmbeddingGenerator
-        self.data_store.store_node(node).await?;
+        // Store the node with hierarchical embedding for rich semantic context
+        self.store_node_with_hierarchical_embedding(node).await?;
 
         timer.complete_success();
         Ok(node_id)
@@ -1520,79 +1815,14 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         node.parent_id = Some(date_node_id.clone());
         node.root_id = Some(date_node_id.clone());
 
-        // Atomic sibling ordering - retry mechanism to handle race conditions
-        let mut retry_count = 0;
-        const MAX_RETRIES: usize = 3;
+        // Store the node with hierarchical embedding for rich semantic context
+        log::info!("💾 DEBUG: About to store node with hierarchical embedding...");
+        self.store_node_with_hierarchical_embedding(node).await?;
 
-        loop {
-            // Get current children atomically
-            let siblings = self.get_children(&date_node_id).await?;
+        // Invalidate cache to ensure fresh data on next read
+        self.invalidate_hierarchy_cache().await;
 
-            if let Some(last_sibling) = siblings.last() {
-                // Optimistic concurrency: try to update both nodes
-                let previous_sibling_id = last_sibling.id.clone();
-
-                // Store the new node first
-                self.data_store.store_node(node.clone()).await?;
-
-                // Attempt to update previous sibling atomically
-                match self.data_store.get_node(&previous_sibling_id).await {
-                    Ok(Some(mut prev_sibling)) => {
-                        // Verify this is still the current last sibling (no race condition)
-                        if prev_sibling.next_sibling.is_none() {
-                            prev_sibling.next_sibling = Some(node_id.clone());
-                            match self.data_store.store_node(prev_sibling).await {
-                                Ok(_) => {
-                                    // Success - atomic update completed, invalidate cache
-                                    self.invalidate_hierarchy_cache().await;
-                                    break;
-                                }
-                                Err(_) if retry_count < MAX_RETRIES => {
-                                    retry_count += 1;
-                                    // Clean up the orphaned node and retry
-                                    let _ = self.data_store.delete_node(&node_id).await;
-                                    continue;
-                                }
-                                Err(e) => return Err(e),
-                            }
-                        } else {
-                            // Race condition detected - someone else added a sibling
-                            if retry_count < MAX_RETRIES {
-                                retry_count += 1;
-                                // Clean up and retry
-                                let _ = self.data_store.delete_node(&node_id).await;
-                                continue;
-                            } else {
-                                return Err(NodeSpaceError::InternalError {
-                                    message: "Failed to maintain sibling ordering after retries"
-                                        .to_string(),
-                                    service: "core-logic".to_string(),
-                                });
-                            }
-                        }
-                    }
-                    _ => {
-                        // Previous sibling was deleted or error occurred
-                        if retry_count < MAX_RETRIES {
-                            retry_count += 1;
-                            let _ = self.data_store.delete_node(&node_id).await;
-                            continue;
-                        } else {
-                            return Err(NodeSpaceError::InternalError {
-                                message: "Previous sibling disappeared during update".to_string(),
-                                service: "core-logic".to_string(),
-                            });
-                        }
-                    }
-                }
-            } else {
-                // No siblings, this is the first child
-                self.data_store.store_node(node).await?;
-                self.invalidate_hierarchy_cache().await;
-                break;
-            }
-        }
-
+        log::info!("🎉 create_node_for_date: COMPLETED SUCCESSFULLY");
         timer.complete_success();
         Ok(node_id)
     }
@@ -1619,27 +1849,38 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             limit
         };
 
-        // For LanceDB: Simple content search using query_nodes
-        let all_nodes = self.data_store.query_nodes(query).await?;
-        let nodes: Vec<_> = all_nodes.into_iter().take(effective_limit).collect();
+        // Generate query embedding for semantic search
+        let query_embedding = self.nlp_engine.generate_embedding(query).await?;
 
-        // Convert to SearchResult with basic scoring
+        // Use embedding-based semantic search from data store
+        let embedding_results = self
+            .data_store
+            .semantic_search_with_embedding(query_embedding, effective_limit)
+            .await?;
+
+        // Convert to SearchResult format
         let mut results = Vec::new();
-        for (index, node) in nodes.into_iter().enumerate() {
-            // Simple scoring based on position (higher position = lower score)
-            let score = 1.0 - (index as f32 * constants::SCORE_DECAY_FACTOR);
-
+        for (node, score) in embedding_results {
             results.push(SearchResult {
                 node_id: node.id.clone(),
                 node,
-                score: score.max(constants::MIN_SEARCH_SCORE),
+                score,
             });
         }
+
+        log::info!(
+            "✅ Semantic search with embeddings completed: {} results for query '{}'",
+            results.len(),
+            query.chars().take(50).collect::<String>()
+        );
 
         Ok(results)
     }
 
     async fn process_query(&self, query: &str) -> NodeSpaceResult<QueryResponse> {
+        log::info!("🚀 ===== RAG PIPELINE STARTED =====");
+        log::info!("📝 INPUT QUERY: '{}'", query);
+
         let timer = self
             .performance_monitor
             .start_operation("process_query")
@@ -1657,22 +1898,34 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         }
 
         // Step 1: Gather context from semantic search
+        log::info!("🔍 === STEP 1: CONTEXT GATHERING ===");
         let (context, sources) = self.gather_query_context(query).await?;
 
         // Step 2: Build and execute prompt
+        log::info!("🏗️ === STEP 2: PROMPT BUILDING ===");
         let prompt = self.build_contextual_prompt(query, &context);
+
+        log::info!("🤖 === STEP 3: LLM GENERATION ===");
         let answer = self.generate_contextual_answer(&prompt, &sources).await?;
 
-        // Step 3: Calculate confidence and generate suggestions
+        // Step 4: Calculate confidence and generate suggestions
+        log::info!("📊 === STEP 4: RESPONSE ASSEMBLY ===");
         let confidence = self.calculate_response_confidence(&context, &answer);
+        log::info!("   Calculated confidence: {:.3}", confidence);
+
         let related_queries = self.generate_related_queries(query);
+        log::info!("   Generated {} related queries", related_queries.len());
 
         let response = QueryResponse {
-            answer,
-            sources,
+            answer: answer.clone(),
+            sources: sources.clone(),
             confidence,
             related_queries,
         };
+
+        log::info!("✅ ===== RAG PIPELINE COMPLETE =====");
+        log::info!("📤 FINAL ANSWER: '{}'", answer);
+        log::info!("📚 SOURCES USED: {} nodes", sources.len());
 
         timer.complete_success();
         Ok(response)
@@ -1883,8 +2136,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                     metadata["parent_id"] = serde_json::Value::String(parent_id.to_string());
                     node.metadata = Some(metadata);
 
-                    // Update sibling relationships if provided (only next_sibling in new schema)
-                    node.next_sibling = None; // Will be updated by subsequent operations if needed
+                    // Update sibling relationships if provided (only before_sibling in new schema)
+                    node.before_sibling = None; // Will be updated by subsequent operations if needed
                 }
             }
             "outdent" => {
@@ -1896,15 +2149,15 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
                 }
 
                 // Reset sibling relationships
-                node.next_sibling = None;
+                node.before_sibling = None;
             }
             "move_up" | "move_down" => {
                 // Update sibling order without changing parent
-                // next_sibling will be handled by update_sibling_order if needed
+                // before_sibling will be handled by update_sibling_order if needed
             }
             "reorder" => {
                 // Move to specific position in sibling list
-                // Sibling ordering is handled through next_sibling field only
+                // Sibling ordering is handled through before_sibling field only
             }
             _ => {
                 return Err(NodeSpaceError::Validation(ValidationError::InvalidFormat {
@@ -1935,20 +2188,30 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             })
         })?;
 
-        let mut metadata = node.metadata.unwrap_or_else(|| serde_json::json!({}));
+        // Update the dedicated parent_id field in the Node schema
+        node.parent_id = parent_id.map(|id| id.clone());
+        self.data_store.update_node(node).await?;
+        Ok(())
+    }
 
-        if let Some(parent_id) = parent_id {
-            // Set parent relationship
-            metadata["parent_id"] = serde_json::Value::String(parent_id.to_string());
-        } else {
-            // Remove parent relationship
-            metadata
-                .as_object_mut()
-                .and_then(|obj| obj.remove("parent_id"));
+    /// Delete node with children transfer - supports Core-UI deletion operations
+    async fn delete_node_with_children_transfer(
+        &self,
+        node_id: &NodeId,
+        children_to_reparent: Vec<NodeId>,
+        new_parent_id: Option<&NodeId>,
+    ) -> NodeSpaceResult<()> {
+        // 1. Reparent children using existing set_node_parent method
+        for child_id in children_to_reparent {
+            self.set_node_parent(&child_id, new_parent_id).await?;
         }
 
-        node.metadata = Some(metadata);
-        self.data_store.update_node(node).await?;
+        // 2. Delete the node using existing data store method
+        self.data_store.delete_node(node_id).await?;
+
+        // 3. Invalidate hierarchy cache after structural change
+        let _ = self.invalidate_hierarchy_cache();
+
         Ok(())
     }
 
@@ -1957,7 +2220,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         &self,
         node_id: &NodeId,
         _previous_sibling_id: Option<&NodeId>,
-        next_sibling_id: Option<&NodeId>,
+        before_sibling_id: Option<&NodeId>,
     ) -> NodeSpaceResult<()> {
         let mut node = self.data_store.get_node(node_id).await?.ok_or_else(|| {
             NodeSpaceError::Database(DatabaseError::NotFound {
@@ -1968,7 +2231,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         })?;
 
         // Update the node's sibling pointers
-        node.next_sibling = next_sibling_id.cloned();
+        node.before_sibling = before_sibling_id.cloned();
 
         // Update the updated node using the data store's update method
         self.data_store.update_node(node).await?;
@@ -1976,15 +2239,15 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
         // Update affected siblings' pointers to maintain consistency
         if let Some(prev_id) = _previous_sibling_id {
             if let Some(mut prev_node) = self.data_store.get_node(prev_id).await? {
-                prev_node.next_sibling = Some(node_id.clone());
+                prev_node.before_sibling = Some(node_id.clone());
                 self.data_store.update_node(prev_node).await?;
             }
         }
 
-        if let Some(next_id) = next_sibling_id {
+        if let Some(next_id) = before_sibling_id {
             if let Some(next_node) = self.data_store.get_node(next_id).await? {
                 // Note: With unidirectional sibling navigation, we don't need to update next_node
-                // The previous sibling link is maintained implicitly through the current node's next_sibling
+                // The previous sibling link is maintained implicitly through the current node's before_sibling
                 self.data_store.update_node(next_node).await?;
             }
         }
@@ -2017,26 +2280,42 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .start_operation("find_date_node")
             .with_metadata("date".to_string(), date.to_string());
 
-        // O(1) indexed lookup using structured query for date nodes
+        // Direct O(1) lookup using predictable date-based node ID
         let date_str = date.format("%Y-%m-%d").to_string();
+        let expected_date_node_id = NodeId::from_string(date_str.clone());
 
-        // Use targeted query instead of scanning all nodes
-        // Query specifically for date nodes with the target date
-        let query = format!("type:date AND date:{}", date_str);
-        let date_nodes = self.data_store.query_nodes(&query).await?;
+        log::info!("🔍 DEBUG find_date_node: START");
+        log::info!("  📅 Looking for date: {}", date);
+        log::info!("  🆔 Expected date node ID: {}", expected_date_node_id);
 
-        // Should return at most one date node for any given date
-        if let Some(date_node) = date_nodes.first() {
-            // Verify this is actually a date node with correct structure
-            // Use the new schema's dedicated type field
-            let is_date_node = date_node.r#type == "date";
+        // Try direct lookup by predictable ID
+        match self.data_store.get_node(&expected_date_node_id).await? {
+            Some(date_node) => {
+                log::info!(
+                    "  📄 Found node: ID={}, type='{}', content={:?}",
+                    date_node.id,
+                    date_node.r#type,
+                    date_node.content
+                );
 
-            if is_date_node {
-                timer.complete_success();
-                return Ok(Some(date_node.id.clone()));
+                // Verify this is actually a date node
+                let is_date_node = date_node.r#type == "date";
+                log::info!("  ✅ Is date node: {}", is_date_node);
+
+                if is_date_node {
+                    log::info!("✅ DEBUG find_date_node: FOUND date node {}", date_node.id);
+                    timer.complete_success();
+                    return Ok(Some(date_node.id.clone()));
+                } else {
+                    log::info!("❌ DEBUG find_date_node: Node exists but is not a date node");
+                }
+            }
+            None => {
+                log::info!("  📄 No node found with expected date node ID");
             }
         }
 
+        log::info!("❌ DEBUG find_date_node: NO date node found");
         timer.complete_success();
         Ok(None)
     }
@@ -2047,36 +2326,50 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> CoreLogic for NodeS
             .start_operation("ensure_date_node_exists")
             .with_metadata("date".to_string(), date.to_string());
 
+        log::info!("📅 DEBUG ensure_date_node_exists: START for date {}", date);
+
         // Check if date node already exists
         if let Some(existing_id) = self.find_date_node(date).await? {
+            log::info!(
+                "✅ DEBUG ensure_date_node_exists: FOUND existing date node {}",
+                existing_id
+            );
             timer.complete_success();
             return Ok(existing_id);
         }
 
-        // Create new date node with proper format
-        let date_content = format!("# {}", date.format("%B %d, %Y"));
-        let node_id = NodeId::new();
-        let _now = chrono::Utc::now().to_rfc3339();
+        log::info!("🆕 DEBUG ensure_date_node_exists: Creating NEW date node...");
 
-        let mut metadata = serde_json::Map::new();
-        metadata.insert(
-            "date".to_string(),
-            serde_json::Value::String(date.format("%Y-%m-%d").to_string()),
+        // Create new date node with empty content (date nodes are purely organizational)
+        let date_str = date.format("%Y-%m-%d").to_string();
+        log::info!("  📅 Date string: {}", date_str);
+
+        // Create date node without metadata (dates don't use metadata anymore)
+        // Use predictable node ID based on date for easy lookup
+        let date_node_id = NodeId::from_string(date_str.clone());
+
+        let mut date_node = Node::new("date".to_string(), serde_json::Value::Null);
+        date_node.id = date_node_id.clone();
+        date_node.metadata = None; // No metadata for date nodes
+        date_node.root_id = None; // Date nodes ARE the root, not children of a root
+
+        log::info!("  📦 Created date node:");
+        log::info!("    🆔 ID: {}", date_node.id);
+        log::info!("    🏷️ Type: '{}'", date_node.r#type);
+        log::info!("    📄 Content: {:?}", date_node.content);
+        log::info!("    📋 Metadata: {:?}", date_node.metadata);
+
+        log::info!("💾 DEBUG: About to store date node with hierarchical embedding...");
+        self.store_node_with_hierarchical_embedding(date_node)
+            .await?;
+        log::info!("✅ DEBUG: Date node stored successfully with hierarchical embedding");
+
+        log::info!(
+            "🎉 DEBUG ensure_date_node_exists: COMPLETED - created date node {}",
+            date_node_id
         );
-        metadata.insert(
-            "node_type".to_string(),
-            serde_json::Value::String("date".to_string()),
-        );
-
-        let mut date_node = Node::new("date".to_string(), serde_json::Value::String(date_content));
-        date_node.id = node_id.clone();
-        date_node.metadata = Some(serde_json::Value::Object(metadata));
-        date_node.root_id = Some(node_id.clone()); // Date nodes are their own root
-
-        self.data_store.store_node(date_node).await?;
-
         timer.complete_success();
-        Ok(node_id)
+        Ok(date_node_id)
     }
 
     /// Get hierarchical nodes for a date using indexed lookup with proper structure
@@ -2524,6 +2817,8 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         content: &str,
         node_type: NodeType,
         metadata: Option<serde_json::Value>,
+        parent_id: Option<NodeId>,
+        before_sibling_id: Option<NodeId>,
     ) -> NodeSpaceResult<()> {
         let timer = self
             .performance_monitor
@@ -2531,6 +2826,19 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             .with_metadata("date".to_string(), date.to_string())
             .with_metadata("content_length".to_string(), content.len().to_string())
             .with_metadata("node_id".to_string(), node_id.as_str().to_string());
+
+        log::info!("🚀 DEBUG create_node_for_date_with_id: START");
+        log::info!("  📝 Node ID: {}", node_id);
+        log::info!("  📅 Date: {}", date);
+        log::info!(
+            "  📄 Content: '{}' (len: {})",
+            content.chars().take(50).collect::<String>(),
+            content.len()
+        );
+        log::info!("  🏷️ Node Type: {:?}", node_type);
+        log::info!("  📋 Metadata: {:?}", metadata);
+        log::info!("  👨‍👩‍👧‍👦 Parent ID: {:?}", parent_id);
+        log::info!("  🔗 Before Sibling ID: {:?}", before_sibling_id);
 
         // Check if service is ready
         if !self.is_ready().await {
@@ -2543,10 +2851,10 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
             return Err(error);
         }
 
-        // Ensure date node exists (creates if necessary using NodeType::Date schema)
+        // Ensure date node exists first (single call)
         let date_node_id = self.ensure_date_node_exists(date).await?;
 
-        // Create new node with provided ID and proper parent relationship
+        // Create new node with provided ID and resolved parent relationship
         let _now = chrono::Utc::now().to_rfc3339();
 
         let mut node = Node::new(
@@ -2555,89 +2863,95 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> HierarchyComputatio
         );
         node.id = node_id.clone();
         node.metadata = metadata;
-        node.parent_id = Some(date_node_id.clone());
-        node.root_id = Some(date_node_id.clone());
 
-        // Atomic sibling ordering - retry mechanism to handle race conditions
-        let mut retry_count = 0;
-        const MAX_RETRIES: usize = 3;
-
-        loop {
-            // Get current children atomically
-            let siblings = self.get_children(&date_node_id).await?;
-
-            if let Some(last_sibling) = siblings.last() {
-                // Optimistic concurrency: try to update both nodes
-                let previous_sibling_id = last_sibling.id.clone();
-
-                // Store the new node first
-                self.data_store.store_node(node.clone()).await?;
-
-                // Attempt to update previous sibling atomically
-                match self.data_store.get_node(&previous_sibling_id).await {
-                    Ok(Some(mut prev_sibling)) => {
-                        // Verify this is still the current last sibling (no race condition)
-                        if prev_sibling.next_sibling.is_none() {
-                            prev_sibling.next_sibling = Some(node_id.clone());
-                            match self.data_store.store_node(prev_sibling).await {
-                                Ok(_) => {
-                                    // Success - atomic update completed, invalidate cache
-                                    self.invalidate_hierarchy_cache().await;
-                                    break;
-                                }
-                                Err(_) if retry_count < MAX_RETRIES => {
-                                    retry_count += 1;
-                                    // Clean up the orphaned node and retry
-                                    let _ = self.data_store.delete_node(&node_id).await;
-                                    continue;
-                                }
-                                Err(e) => {
-                                    timer.complete_error(e.to_string());
-                                    return Err(e);
-                                }
-                            }
-                        } else {
-                            // Race condition detected - someone else added a sibling
-                            if retry_count < MAX_RETRIES {
-                                retry_count += 1;
-                                // Clean up and retry
-                                let _ = self.data_store.delete_node(&node_id).await;
-                                continue;
-                            } else {
-                                let error = NodeSpaceError::InternalError {
-                                    message: "Failed to maintain sibling ordering after retries"
-                                        .to_string(),
-                                    service: "core-logic".to_string(),
-                                };
-                                timer.complete_error(error.to_string());
-                                return Err(error);
-                            }
-                        }
+        // Handle parent and root relationships based on node type and provided parent
+        let actual_parent_id = if node_id == date_node_id {
+            // This IS the date node - no parent, no root (it IS the root)
+            node.parent_id = None;
+            node.root_id = None;
+            log::info!("🔧 DEBUG: Date node created with no parent/root (it IS the root)");
+            None // Date nodes have no parent for sibling validation
+        } else {
+            // This is a regular node - resolve parent and set root
+            let resolved_parent_id = match parent_id {
+                Some(explicit_parent) => {
+                    // User specified a parent - use it (hierarchical node)
+                    // Validate that the parent exists
+                    if self.data_store.get_node(&explicit_parent).await?.is_none() {
+                        let error = NodeSpaceError::Database(DatabaseError::NotFound {
+                            entity_type: "parent_node".to_string(),
+                            id: explicit_parent.to_string(),
+                            suggestions: vec!["verify_parent_exists".to_string()],
+                        });
+                        timer.complete_error(error.to_string());
+                        return Err(error);
                     }
-                    _ => {
-                        // Previous sibling was deleted or error occurred
-                        if retry_count < MAX_RETRIES {
-                            retry_count += 1;
-                            let _ = self.data_store.delete_node(&node_id).await;
-                            continue;
-                        } else {
-                            let error = NodeSpaceError::InternalError {
-                                message: "Previous sibling disappeared during update".to_string(),
-                                service: "core-logic".to_string(),
-                            };
-                            timer.complete_error(error.to_string());
-                            return Err(error);
-                        }
-                    }
+                    explicit_parent
                 }
+                None => {
+                    // No parent specified - should be direct child of date node
+                    date_node_id.clone()
+                }
+            };
+
+            node.parent_id = Some(resolved_parent_id.clone());
+            node.root_id = Some(date_node_id.clone());
+
+            log::info!("🔧 DEBUG parent resolution:");
+            log::info!("  🎯 Actual parent ID: {}", resolved_parent_id);
+            log::info!("  📅 Date node ID: {}", date_node_id);
+
+            Some(resolved_parent_id) // Return parent for sibling validation
+        };
+
+        log::info!("📦 DEBUG node created:");
+        log::info!("  🆔 Node ID: {}", node.id);
+        log::info!("  🏷️ Node type: {}", node.r#type);
+        log::info!("  📄 Content: {:?}", node.content);
+        log::info!("  👨‍👩‍👧‍👦 Parent ID: {:?}", node.parent_id);
+        log::info!("  🌳 Root ID: {:?}", node.root_id);
+
+        // Sibling ordering using before_sibling_id approach
+        if let Some(before_sibling_id_val) = &before_sibling_id {
+            // Validate before sibling exists and has the same parent
+            if let Some(before_sibling) = self.data_store.get_node(&before_sibling_id_val).await? {
+                if before_sibling.parent_id != actual_parent_id {
+                    let error = NodeSpaceError::Validation(ValidationError::InvalidFormat {
+                        field: "before_sibling_id".to_string(),
+                        expected: format!("sibling with parent_id {:?}", actual_parent_id),
+                        actual: format!("node with parent_id {:?}", before_sibling.parent_id),
+                        examples: vec!["ensure before_sibling has same parent".to_string()],
+                    });
+                    timer.complete_error(error.to_string());
+                    return Err(error);
+                }
+                log::info!(
+                    "🔗 DEBUG: Linking node after before sibling: {}",
+                    before_sibling_id_val
+                );
             } else {
-                // No siblings, this is the first child
-                self.data_store.store_node(node).await?;
-                self.invalidate_hierarchy_cache().await;
-                break;
+                let error = NodeSpaceError::Database(DatabaseError::NotFound {
+                    entity_type: "before_sibling".to_string(),
+                    id: before_sibling_id_val.to_string(),
+                    suggestions: vec!["verify_sibling_exists".to_string()],
+                });
+                timer.complete_error(error.to_string());
+                return Err(error);
             }
+        } else {
+            log::info!("🥇 DEBUG: First child under parent (no before sibling)");
         }
 
+        // Set before_sibling on the node (much cleaner than before_sibling approach!)
+        node.before_sibling = before_sibling_id;
+
+        // Store the node with hierarchical embedding for rich semantic context
+        log::info!("💾 DEBUG: About to store node with hierarchical embedding...");
+        self.store_node_with_hierarchical_embedding(node).await?;
+        log::info!("✅ DEBUG: Node stored successfully with hierarchical embedding");
+        self.invalidate_hierarchy_cache().await;
+
+        log::info!("🎉 DEBUG create_node_for_date_with_id: COMPLETED SUCCESSFULLY");
         timer.complete_success();
         Ok(())
     }
@@ -3269,9 +3583,32 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         &self,
         query: &str,
     ) -> NodeSpaceResult<(Vec<String>, Vec<NodeId>)> {
+        log::info!("🔍 STEP 1: Starting semantic search for query: '{}'", query);
+
         let search_results = self
             .semantic_search(query, constants::DEFAULT_SEARCH_LIMIT)
             .await?;
+
+        log::info!(
+            "📊 STEP 1 RESULTS: Found {} semantic search results",
+            search_results.len()
+        );
+
+        // Log each search result with score and snippet
+        for (i, result) in search_results.iter().enumerate() {
+            let snippet = result
+                .node
+                .content
+                .as_str()
+                .map(|s| s.chars().take(100).collect::<String>())
+                .unwrap_or_else(|| "No content".to_string());
+            log::info!(
+                "   {}. Score: {:.3} | Snippet: '{}'...",
+                i + 1,
+                result.score,
+                snippet
+            );
+        }
 
         let context: Vec<String> = search_results
             .iter()
@@ -3283,12 +3620,24 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             .map(|result| result.node_id.clone())
             .collect();
 
+        log::info!(
+            "📝 STEP 1 CONTEXT: Gathered {} context pieces from {} sources",
+            context.len(),
+            sources.len()
+        );
+
         Ok((context, sources))
     }
 
     /// Helper method to build contextual prompt with length management
     fn build_contextual_prompt(&self, query: &str, context: &[String]) -> String {
+        log::info!("🏗️ STEP 2: Building contextual prompt");
+        log::info!("   Query: '{}'", query);
+        log::info!("   Context pieces: {}", context.len());
+
         let context_text = context.join("\n\n");
+        log::info!("   Combined context length: {} chars", context_text.len());
+
         let max_context_len = self
             .config
             .performance_config
@@ -3296,20 +3645,37 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             .unwrap_or(constants::DEFAULT_CONTEXT_WINDOW)
             .saturating_sub(query.len() + constants::PROMPT_STRUCTURE_RESERVE);
 
+        log::info!("   Max context length allowed: {} chars", max_context_len);
+
         let truncated_context = if context_text.len() > max_context_len {
+            log::info!(
+                "   ⚠️ Context truncated from {} to {} chars",
+                context_text.len(),
+                max_context_len
+            );
             format!("{}...", &context_text[..max_context_len])
         } else {
+            log::info!("   ✅ Context fits within limits");
             context_text
         };
 
-        if truncated_context.is_empty() {
-            format!("Answer this question based on general knowledge: {}", query)
+        let final_prompt = if truncated_context.is_empty() {
+            log::info!("   📝 Using general knowledge prompt (no context)");
+            format!("Answer this question: {}", query)
         } else {
+            log::info!("   📝 Using simplified contextual prompt");
             format!(
-                "Based on the following context, answer the question: {}\n\nContext:\n{}",
-                query, truncated_context
+                "Context:\n{}\n\nQuestion: {}\n\nAnswer:",
+                truncated_context, query
             )
-        }
+        };
+
+        log::info!(
+            "🎯 STEP 2 COMPLETE: Final prompt length: {} chars",
+            final_prompt.len()
+        );
+
+        final_prompt
     }
 
     /// Helper method to generate contextual answer with fallback handling
@@ -3318,9 +3684,52 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         prompt: &str,
         sources: &[NodeId],
     ) -> NodeSpaceResult<String> {
-        match self.nlp_engine.generate_text(prompt).await {
-            Ok(text) => Ok(text),
+        log::info!("🤖 STEP 3: Starting LLM text generation");
+        log::info!("   Prompt length: {} chars", prompt.len());
+        log::info!("   Source nodes: {}", sources.len());
+        log::info!("   📝 FULL PROMPT SENT TO LLM:\n{}", prompt);
+
+        // Create enhanced text generation request with NLP team's recommended parameters
+        let text_request = TextGenerationRequest {
+            prompt: prompt.to_string(),
+            max_tokens: 100,          // NLP team recommendation
+            temperature: 1.0,         // NLP team recommendation (increased from 0.7)
+            context_window: 8192,     // Standard context window
+            conversation_mode: false, // Not a conversation, single RAG query
+            rag_context: Some(RAGContext {
+                knowledge_sources: sources
+                    .iter()
+                    .map(|id| format!("node:{}", id.as_str()))
+                    .collect(),
+                retrieval_confidence: 0.8, // High confidence in our retrieval
+                context_summary: "Campaign management data retrieved from semantic search"
+                    .to_string(),
+                suggested_links: vec![], // No smart links for now
+            }),
+            enable_link_generation: false, // Disable for simplicity
+            node_metadata: vec![],         // No metadata for now
+        };
+
+        log::info!(
+            "   🎯 Using enhanced generation: temp={}, max_tokens={}",
+            text_request.temperature,
+            text_request.max_tokens
+        );
+
+        match self.nlp_engine.generate_text_enhanced(text_request).await {
+            Ok(response) => {
+                log::info!("✅ STEP 3 SUCCESS: Enhanced LLM generated response");
+                log::info!("   Response length: {} chars", response.text.len());
+                log::info!("   Tokens used: {}", response.tokens_used);
+                log::info!(
+                    "   Generation time: {}ms",
+                    response.generation_metrics.generation_time_ms
+                );
+                log::info!("   🎯 GENERATED ANSWER: '{}'", response.text);
+                Ok(response.text)
+            }
             Err(e) => {
+                log::error!("❌ STEP 3 FAILED: LLM generation error: {}", e);
                 // Handle text generation failure based on configuration
                 match self.config.offline_config.offline_fallback {
                     OfflineFallback::Error => {
@@ -3341,6 +3750,124 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Generate intelligent AI response using real Ollama integration
+    /// This method implements the REAL AI functionality required by NS-127
+    pub async fn generate_ai_response(
+        &self,
+        query: &str,
+        context_nodes: &[NodeId],
+    ) -> NodeSpaceResult<String> {
+        log::info!("🤖 Generating REAL AI response using Ollama integration");
+        log::info!("   Query: '{}'", query);
+        log::info!("   Context nodes: {}", context_nodes.len());
+
+        // Check if service is ready
+        if !self.is_ready().await {
+            return Err(NodeSpaceError::InternalError {
+                message: "Service not ready for AI response generation".to_string(),
+                service: "core-logic".to_string(),
+            });
+        }
+
+        // Step 1: Perform semantic search if no context provided
+        let relevant_nodes = if context_nodes.is_empty() {
+            log::info!("   No context provided, performing semantic search");
+            match self.semantic_search(query, 5).await {
+                Ok(results) => results.into_iter().map(|r| r.node_id).collect(),
+                Err(e) => {
+                    log::warn!("   Semantic search failed: {}, using empty context", e);
+                    vec![]
+                }
+            }
+        } else {
+            context_nodes.to_vec()
+        };
+
+        // Step 2: Build rich RAG context from nodes
+        let mut context_texts = Vec::new();
+        for node_id in &relevant_nodes {
+            if let Ok(Some(node)) = self.data_store.get_node(node_id).await {
+                context_texts.push(format!("Document: {}", node.content));
+            }
+        }
+
+        let context_text = if context_texts.is_empty() {
+            String::new()
+        } else {
+            context_texts.join("\n\n")
+        };
+
+        // Step 3: Create enhanced prompt for RAG
+        let prompt = if context_text.is_empty() {
+            format!("Answer this question using your knowledge: {}", query)
+        } else {
+            format!(
+                "Context Information:\n{}\n\nBased on the context above, answer this question: {}\n\nProvide a helpful and accurate response:",
+                context_text,
+                query
+            )
+        };
+
+        // Step 4: Use REAL enhanced text generation with Ollama
+        let text_request = TextGenerationRequest {
+            prompt: prompt.clone(),
+            max_tokens: 2000,         // Increased for richer responses
+            temperature: 0.7,         // Balanced creativity
+            context_window: 8192,     // Full context window
+            conversation_mode: false, // Single query mode
+            rag_context: Some(RAGContext {
+                knowledge_sources: relevant_nodes
+                    .iter()
+                    .map(|id| format!("node:{}", id.as_str()))
+                    .collect(),
+                retrieval_confidence: if context_text.is_empty() { 0.3 } else { 0.8 },
+                context_summary: if context_text.is_empty() {
+                    "General knowledge query".to_string()
+                } else {
+                    "Relevant documents retrieved from knowledge base".to_string()
+                },
+                suggested_links: vec![],
+            }),
+            enable_link_generation: true, // Enable smart linking
+            node_metadata: vec![],
+        };
+
+        log::info!(
+            "   Sending request to Ollama (temp={}, max_tokens={})",
+            text_request.temperature,
+            text_request.max_tokens
+        );
+
+        // Step 5: Generate response using real Ollama AI
+        match self.nlp_engine.generate_text_enhanced(text_request).await {
+            Ok(response) => {
+                log::info!("✅ REAL AI response generated successfully");
+                log::info!("   Response length: {} chars", response.text.len());
+                log::info!("   Tokens used: {}", response.tokens_used);
+                log::info!(
+                    "   Generation time: {}ms",
+                    response.generation_metrics.generation_time_ms
+                );
+                log::info!(
+                    "   Context utilization: references={}, score={:.2}",
+                    response.context_utilization.context_referenced,
+                    response.context_utilization.relevance_score
+                );
+
+                // Return the actual AI-generated response
+                Ok(response.text)
+            }
+            Err(e) => {
+                log::error!("❌ REAL AI generation failed: {}", e);
+                Err(NodeSpaceError::Processing(ProcessingError::model_error(
+                    "core-logic",
+                    "ai-response-generation",
+                    &format!("Real Ollama AI generation failed: {}", e),
+                )))
             }
         }
     }
@@ -3425,7 +3952,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             if let Some(parent) = &node.parent_id {
                 children_map
                     .entry(parent.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(node.id.clone());
             }
         }
@@ -3441,29 +3968,70 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         }
 
         // Recursively build hierarchical structure for children of parent_id
-        self.build_hierarchical_nodes_recursive(&node_map, &children_map, parent_id, start_depth)
+        // Initialize cycle detection with visited set
+        let mut visited = HashSet::new();
+        log::debug!(
+            "🏗️ Building hierarchy for parent {} with {} total nodes in tree",
+            parent_id,
+            node_map.len()
+        );
+        self.build_hierarchical_nodes_recursive_safe(
+            &node_map,
+            &children_map,
+            parent_id,
+            start_depth,
+            &mut visited,
+        )
     }
 
-    /// Recursive helper for building HierarchicalNode structure in memory
+    /// Recursive helper for building HierarchicalNode structure in memory with cycle detection
     /// (no database calls - works entirely from pre-loaded data)
-    fn build_hierarchical_nodes_recursive(
+    /// FIXED: Added cycle detection to prevent infinite recursion from circular parent-child relationships
+    #[allow(clippy::only_used_in_recursion)]
+    fn build_hierarchical_nodes_recursive_safe(
         &self,
         node_map: &HashMap<NodeId, Node>,
         children_map: &HashMap<NodeId, Vec<NodeId>>,
         parent_id: &NodeId,
         depth: u32,
+        visited: &mut HashSet<NodeId>,
     ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        // CYCLE DETECTION: Check if we've already visited this node
+        if visited.contains(parent_id) {
+            log::warn!(
+                "🔄 Detected cycle in hierarchy at node {}: skipping to prevent infinite recursion",
+                parent_id
+            );
+            return Ok(vec![]); // Return empty to break the cycle
+        }
+
+        // Add current node to visited set
+        visited.insert(parent_id.clone());
+
         let mut hierarchical_children = Vec::new();
+
+        // DEPTH LIMIT: Additional safety check to prevent extremely deep hierarchies
+        const MAX_DEPTH: u32 = 100; // Reasonable limit for most use cases
+        if depth > MAX_DEPTH {
+            log::warn!(
+                "⚠️ Maximum hierarchy depth ({}) exceeded at node {}: stopping recursion",
+                MAX_DEPTH,
+                parent_id
+            );
+            visited.remove(parent_id); // Clean up visited set
+            return Ok(vec![]);
+        }
 
         if let Some(child_ids) = children_map.get(parent_id) {
             for (index, child_id) in child_ids.iter().enumerate() {
                 if let Some(child_node) = node_map.get(child_id) {
-                    // Recursively build grandchildren (but all from memory, no DB calls)
-                    let grandchildren = self.build_hierarchical_nodes_recursive(
+                    // Recursively build grandchildren with cycle detection
+                    let grandchildren = self.build_hierarchical_nodes_recursive_safe(
                         node_map,
                         children_map,
                         child_id,
                         depth + 1,
+                        visited,
                     )?;
 
                     hierarchical_children.push(HierarchicalNode {
@@ -3477,7 +4045,31 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             }
         }
 
+        // Remove current node from visited set (backtrack)
+        visited.remove(parent_id);
+
         Ok(hierarchical_children)
+    }
+
+    /// Legacy recursive function - kept for backward compatibility but not used
+    /// Use build_hierarchical_nodes_recursive_safe instead
+    #[allow(dead_code)]
+    fn build_hierarchical_nodes_recursive(
+        &self,
+        node_map: &HashMap<NodeId, Node>,
+        children_map: &HashMap<NodeId, Vec<NodeId>>,
+        parent_id: &NodeId,
+        depth: u32,
+    ) -> NodeSpaceResult<Vec<HierarchicalNode>> {
+        // Redirect to safe version with cycle detection
+        let mut visited = HashSet::new();
+        self.build_hierarchical_nodes_recursive_safe(
+            node_map,
+            children_map,
+            parent_id,
+            depth,
+            &mut visited,
+        )
     }
 
     /// Efficient root-based hierarchy fetching with indexed lookups - OPTIMIZED FOR O(1)
@@ -3510,50 +4102,46 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             .cloned()
             .collect();
 
-        // Business rule: Maintain sibling ordering using next_sibling/previous_sibling pointers
+        // Business rule: Maintain sibling ordering using before_sibling/previous_sibling pointers
         children = self.sort_siblings_by_chain(children, &node_map)?;
 
         Ok(children)
     }
 
     /// Sort siblings according to sibling chain pointers (business logic)
+    /// UPDATED: Now uses before_sibling instead of before_sibling
     fn sort_siblings_by_chain(
         &self,
         mut siblings: Vec<Node>,
-        node_map: &HashMap<NodeId, Node>,
+        _node_map: &HashMap<NodeId, Node>,
     ) -> NodeSpaceResult<Vec<Node>> {
         if siblings.is_empty() {
             return Ok(siblings);
         }
 
-        // Find the first sibling (the one that no other sibling points to with next_sibling)
+        // Find the first sibling (the one that has before_sibling: None)
         let first_sibling = siblings
             .iter()
-            .find(|node| {
-                // This node is first if no other sibling has it as next_sibling
-                !siblings
-                    .iter()
-                    .any(|other| other.next_sibling.as_ref() == Some(&node.id))
-            })
+            .find(|node| node.before_sibling.is_none())
             .cloned();
 
         if let Some(first) = first_sibling {
-            // Follow the sibling chain to build ordered list
+            // Build ordered list by following before_sibling chain
             let mut ordered = Vec::new();
             let mut current = Some(first);
 
             while let Some(node) = current {
                 ordered.push(node.clone());
 
-                // Move to next sibling
-                current = node
-                    .next_sibling
-                    .as_ref()
-                    .and_then(|next_id| node_map.get(next_id))
+                // Find the next sibling: the one that has before_sibling pointing to current node
+                current = siblings
+                    .iter()
+                    .find(|sibling| sibling.before_sibling.as_ref() == Some(&node.id))
                     .cloned();
 
                 // Prevent infinite loops
                 if ordered.len() > siblings.len() {
+                    log::warn!("🔄 Detected infinite loop in sibling chain, breaking");
                     break;
                 }
             }
@@ -3601,7 +4189,7 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
             .collect();
 
         // Business logic: Sort by sibling chain for proper ordering
-        // With unidirectional next_sibling, we need to follow the chain
+        // With unidirectional before_sibling, we need to follow the chain
         let mut node_map = HashMap::new();
         for child in &children {
             node_map.insert(child.id.clone(), child.clone());

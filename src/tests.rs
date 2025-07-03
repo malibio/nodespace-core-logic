@@ -2291,4 +2291,294 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_create_node_for_date_with_id_lazy_date_creation() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+        let node_id = NodeId::from_string("test-node".to_string());
+
+        // Test Case 1: Empty Date - First node creation should auto-create date node
+        let result = service
+            .create_node_for_date_with_id(
+                node_id.clone(),
+                date,
+                "Hello World",
+                DataStoreNodeType::Text,
+                Some(json!({"type": "test"})),
+                None, // No parent = direct child of date node
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Failed to create node for new date: {:?}",
+            result
+        );
+
+        // Verify date node was created
+        let date_node_id = service.ensure_date_node_exists(date).await.unwrap();
+        let date_node = service.data_store.get_node(&date_node_id).await.unwrap();
+        assert!(date_node.is_some(), "Date node should exist after creation");
+
+        // Verify content node was created with correct parent
+        let content_node = service.data_store.get_node(&node_id).await.unwrap();
+        assert!(content_node.is_some(), "Content node should exist");
+        let content_node = content_node.unwrap();
+        assert_eq!(
+            content_node.parent_id,
+            Some(date_node_id),
+            "Content node should be child of date node"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_node_for_date_with_id_existing_date() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+
+        // Pre-create a date node
+        let date_node_id = service.ensure_date_node_exists(date).await.unwrap();
+
+        // Test Case 2: Existing Date - Subsequent nodes should reuse existing date node
+        let first_node_id = NodeId::from_string("first-node".to_string());
+        let second_node_id = NodeId::from_string("second-node".to_string());
+
+        // Create first node
+        let result1 = service
+            .create_node_for_date_with_id(
+                first_node_id.clone(),
+                date,
+                "First content",
+                DataStoreNodeType::Text,
+                None,
+                None,
+            )
+            .await;
+        assert!(result1.is_ok());
+
+        // Create second node
+        let result2 = service
+            .create_node_for_date_with_id(
+                second_node_id.clone(),
+                date,
+                "Second content",
+                DataStoreNodeType::Text,
+                None,
+                None,
+            )
+            .await;
+        assert!(result2.is_ok());
+
+        // Verify both nodes share the same date parent
+        let first_node = service
+            .data_store
+            .get_node(&first_node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_node = service
+            .data_store
+            .get_node(&second_node_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first_node.parent_id, Some(date_node_id.clone()));
+        assert_eq!(second_node.parent_id, Some(date_node_id));
+    }
+
+    #[tokio::test]
+    async fn test_create_node_for_date_with_id_hierarchical_structure() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+
+        // Create parent node first
+        let parent_node_id = NodeId::from_string("parent-node".to_string());
+        service
+            .create_node_for_date_with_id(
+                parent_node_id.clone(),
+                date,
+                "Parent content",
+                DataStoreNodeType::Text,
+                None,
+                None, // Direct child of date node
+            )
+            .await
+            .unwrap();
+
+        // Test Case 3: Hierarchy - Indented nodes should work with explicit parent IDs
+        let child_node_id = NodeId::from_string("child-node".to_string());
+        let result = service
+            .create_node_for_date_with_id(
+                child_node_id.clone(),
+                date,
+                "Indented content",
+                DataStoreNodeType::Text,
+                Some(json!({"indented": true})),
+                Some(parent_node_id.clone()), // Specific parent = hierarchical structure
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Failed to create hierarchical node: {:?}",
+            result
+        );
+
+        // Verify child node has correct parent
+        let child_node = service
+            .data_store
+            .get_node(&child_node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            child_node.parent_id,
+            Some(parent_node_id),
+            "Child node should have parent node as parent"
+        );
+
+        // Verify root_id still points to date node
+        let date_node_id = service.ensure_date_node_exists(date).await.unwrap();
+        assert_eq!(
+            child_node.root_id,
+            Some(date_node_id),
+            "Child node should have date node as root"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_node_for_date_with_id_invalid_parent() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+        let node_id = NodeId::from_string("test-node".to_string());
+        let nonexistent_parent = NodeId::from_string("nonexistent".to_string());
+
+        // Test Case 4: Invalid parent should return error
+        let result = service
+            .create_node_for_date_with_id(
+                node_id,
+                date,
+                "Content",
+                DataStoreNodeType::Text,
+                None,
+                Some(nonexistent_parent),
+            )
+            .await;
+
+        assert!(result.is_err(), "Should fail with nonexistent parent");
+
+        if let Err(NodeSpaceError::Database(DatabaseError::NotFound { entity_type, .. })) = result {
+            assert_eq!(entity_type, "parent_node");
+        } else {
+            panic!("Expected NotFound error for nonexistent parent");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_node_for_date_with_id_backwards_compatibility() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+        let node_id = NodeId::from_string("test-node".to_string());
+
+        // Test Case 5: Backward Compatibility - Existing calls with parent_id: None continue working
+        let result = service
+            .create_node_for_date_with_id(
+                node_id.clone(),
+                date,
+                "Test content",
+                DataStoreNodeType::Text,
+                Some(json!({"test": true})),
+                None, // This is the backward compatible behavior
+            )
+            .await;
+
+        assert!(result.is_ok(), "Backward compatible call should work");
+
+        // Verify the node was created as direct child of date node
+        let content_node = service
+            .data_store
+            .get_node(&node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let date_node_id = service.ensure_date_node_exists(date).await.unwrap();
+
+        assert_eq!(content_node.parent_id, Some(date_node_id.clone()));
+        assert_eq!(content_node.root_id, Some(date_node_id));
+    }
+
+    #[tokio::test]
+    async fn test_create_node_for_date_with_id_date_navigation() {
+        let service = create_test_service();
+        service.initialize().await.unwrap();
+
+        // Test Case 6: Date Navigation - Switching dates should work seamlessly
+        let date1 = chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+        let date2 = chrono::NaiveDate::from_ymd_opt(2025, 7, 2).unwrap();
+
+        let node1_id = NodeId::from_string("node1".to_string());
+        let node2_id = NodeId::from_string("node2".to_string());
+
+        // Create node for first date
+        service
+            .create_node_for_date_with_id(
+                node1_id.clone(),
+                date1,
+                "Content for July 1st",
+                DataStoreNodeType::Text,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Create node for second date
+        service
+            .create_node_for_date_with_id(
+                node2_id.clone(),
+                date2,
+                "Content for July 2nd",
+                DataStoreNodeType::Text,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Verify each node has its own date parent
+        let date1_node_id = service.ensure_date_node_exists(date1).await.unwrap();
+        let date2_node_id = service.ensure_date_node_exists(date2).await.unwrap();
+
+        let node1 = service
+            .data_store
+            .get_node(&node1_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let node2 = service
+            .data_store
+            .get_node(&node2_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(node1.parent_id, Some(date1_node_id.clone()));
+        assert_eq!(node2.parent_id, Some(date2_node_id.clone()));
+        assert_ne!(
+            date1_node_id, date2_node_id,
+            "Different dates should have different date nodes"
+        );
+    }
 }

@@ -7,13 +7,15 @@ description = "Business logic and service orchestration for NodeSpace"
 [dependencies]
 nodespace-core-types = { path = "../nodespace-core-types" }
 nodespace-data-store = { path = "../nodespace-data-store" }
-nodespace-nlp-engine = { path = "../nodespace-nlp-engine" }
+nodespace-nlp-engine = { path = "../nodespace-nlp-engine", features = ["real-ml", "ollama"] }
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+env_logger = "0.11"
 
 # Features temporarily disabled until dependency issues are resolved
 # [features]
@@ -29,6 +31,39 @@ futures = "0.3"
 uuid = { version = "1.6", features = ["v4"] }
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio-test = "0.4"
+
+[[example]]
+name = "populate_campaign_data"
+
+[[example]]
+name = "verify_campaign_data"
+
+[[example]]
+name = "test_simple_hierarchy"
+
+[[example]]
+name = "populate_from_json"
+
+[[example]]
+name = "count_all_nodes"
+
+[[example]]
+name = "populate_with_sibling_order"
+
+[[example]]
+name = "verify_sibling_order"
+
+[[example]]
+name = "search_description"
+
+[[example]]
+name = "show_sibling_column"
+
+[[example]]
+name = "test_real_ollama"
+
+[[example]]
+name = "test_desktop_integration"
 
 [[bench]]
 name = "date_lookup_performance"
