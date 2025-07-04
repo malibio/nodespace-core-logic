@@ -17,12 +17,6 @@ chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
 
-# Features temporarily disabled until dependency issues are resolved
-# [features]
-# default = ["data-store", "nlp-engine"]
-# data-store = ["dep:nodespace-data-store"]
-# nlp-engine = ["dep:nodespace-nlp-engine"]
-
 [dev-dependencies]
 lancedb = "0.20.0"
 arrow-array = "55"
@@ -33,39 +27,6 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio-test = "0.4"
 
 [[example]]
-name = "populate_campaign_data"
-
-[[example]]
-name = "verify_campaign_data"
-
-[[example]]
-name = "test_simple_hierarchy"
-
-[[example]]
 name = "populate_from_json"
-
-[[example]]
-name = "count_all_nodes"
-
-[[example]]
-name = "populate_with_sibling_order"
-
-[[example]]
-name = "verify_sibling_order"
-
-[[example]]
-name = "search_description"
-
-[[example]]
-name = "show_sibling_column"
-
-[[example]]
-name = "test_real_ollama"
-
-[[example]]
-name = "test_desktop_integration"
-
-[[bench]]
-name = "date_lookup_performance"
-harness = false
+path = "examples/populate_from_json.rs"
 

@@ -205,6 +205,7 @@ async fn main() -> NodeSpaceResult<()> {
     Ok(())
 }
 
+#[allow(clippy::implied_bounds_in_impls)]
 async fn create_node_from_json(
     service: &NodeSpaceService<
         impl nodespace_data_store::DataStore + Send + Sync,
