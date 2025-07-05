@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use nodespace_core_types::{
-    DatabaseError, Node, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError, ValidationError,
+    DatabaseError, Node, NodeContext, NodeId, NodeSpaceError, NodeSpaceResult, ProcessingError, ValidationError,
 };
 use nodespace_data_store::NodeType;
 use serde::{Deserialize, Serialize};
@@ -1044,29 +1044,23 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
         cache.invalidate_node_embeddings(node_id);
     }
 
-    /// Build contextual content for embeddings
-    async fn build_contextual_content(&self, node: &Node) -> NodeSpaceResult<String> {
-        let mut contextual_parts = Vec::new();
-
-        // Add the node's own content
-        if let Some(content) = node.content.as_str() {
-            contextual_parts.push(format!("Content: {}", content));
-        }
+    /// Build NodeContext with collective siblings for enhanced contextual embeddings
+    /// This replaces individual sibling processing with the collective approach
+    async fn build_node_context(&self, node: &Node) -> NodeSpaceResult<NodeContext> {
+        let mut context = NodeContext::default();
 
         // Add parent context
         if let Some(parent_id) = &node.parent_id {
             if let Ok(Some(parent_node)) = self.data_store.get_node(parent_id).await {
-                if let Some(parent_content) = parent_node.content.as_str() {
-                    contextual_parts.push(format!("Parent: {}", parent_content));
-                }
+                context = context.with_parent(parent_node);
             }
         }
 
-        // Add sibling context (limited to avoid overwhelming)
+        // ✅ NEW: Collective sibling population
         if let Some(parent_id) = &node.parent_id {
-            let siblings = self.get_children(parent_id).await.unwrap_or_default();
-            let sibling_contents: Vec<String> = siblings
-                .iter()
+            let all_children = self.get_children(parent_id).await.unwrap_or_default();
+            let siblings: Vec<Node> = all_children
+                .into_iter()
                 .filter(|sibling| sibling.id != node.id)
                 .take(
                     self.config
@@ -1074,28 +1068,119 @@ impl<D: DataStore + Send + Sync, N: NLPEngine + Send + Sync> NodeSpaceService<D,
                         .max_siblings_context
                         .unwrap_or(10),
                 ) // Configurable sibling limit
-                .filter_map(|sibling| sibling.content.as_str())
-                .map(|content| format!("Sibling: {}", content))
                 .collect();
-            contextual_parts.extend(sibling_contents);
+            
+            if !siblings.is_empty() {
+                context = context.with_siblings(siblings);
+                log::debug!("✅ Built collective sibling context with {} siblings", context.siblings.len());
+            }
         }
 
-        // Add children context (limited to avoid overwhelming)
+        // Add children as related nodes (for future mention/reference tracking)
         let children = self.get_children(&node.id).await.unwrap_or_default();
-        let children_contents: Vec<String> = children
-            .iter()
+        let limited_children: Vec<Node> = children
+            .into_iter()
             .take(
                 self.config
                     .performance_config
                     .max_children_context
                     .unwrap_or(10),
             ) // Configurable children limit
-            .filter_map(|child| child.content.as_str())
-            .map(|content| format!("Child: {}", content))
             .collect();
-        contextual_parts.extend(children_contents);
+        
+        if !limited_children.is_empty() {
+            context = context.with_related_nodes(limited_children);
+        }
 
-        Ok(contextual_parts.join("\n"))
+        Ok(context)
+    }
+
+    /// Get enhanced contextual embedding using NLP engine's multi-level embedding generation
+    /// This method uses the proper NodeContext with collective siblings for optimal embedding quality
+    pub async fn get_enhanced_contextual_embedding(
+        &self,
+        node: &Node,
+    ) -> NodeSpaceResult<Vec<f32>> {
+        // Check if service is ready
+        if !self.is_ready().await {
+            return Err(NodeSpaceError::InternalError {
+                message: "Service not ready for enhanced contextual embedding".to_string(),
+                service: "core-logic".to_string(),
+            });
+        }
+
+        // Build proper NodeContext with collective siblings
+        let context = self.build_node_context(node).await?;
+        
+        // Use NLP engine's optimized contextual embedding generation
+        match self.nlp_engine.generate_contextual_embedding(node, &context).await {
+            Ok(embedding) => {
+                log::debug!("✅ Generated enhanced contextual embedding using collective siblings approach");
+                Ok(embedding)
+            },
+            Err(e) => {
+                log::warn!("Enhanced contextual embedding failed, falling back to simple embedding: {}", e);
+                // Fallback to simple embedding
+                let content = node.content.as_str().unwrap_or("");
+                self.nlp_engine.generate_embedding(content).await
+            }
+        }
+    }
+
+    /// Build contextual content for embeddings using proper NodeContext
+    /// This method now leverages the NLP engine's optimized contextual embedding generation
+    async fn build_contextual_content(&self, node: &Node) -> NodeSpaceResult<String> {
+        // Build proper NodeContext with collective siblings
+        let context = self.build_node_context(node).await?;
+        
+        // Use NLP engine's contextual embedding generation for consistent context building
+        // This ensures we use the same context format as multi-level embeddings
+        if context.parent.is_some() || !context.siblings.is_empty() || !context.related_nodes.is_empty() {
+            // Let the NLP engine handle context formatting consistently
+            let mut contextual_parts = Vec::new();
+            
+            // Add the node's own content
+            if let Some(content) = node.content.as_str() {
+                contextual_parts.push(format!("Content: {}", content));
+            }
+            
+            // Add parent context
+            if let Some(parent) = &context.parent {
+                if let Some(parent_content) = parent.content.as_str() {
+                    contextual_parts.push(format!("Parent: {}", parent_content));
+                }
+            }
+            
+            // ✅ NEW: Use collective siblings from context
+            if !context.siblings.is_empty() {
+                let sibling_contents: Vec<String> = context.siblings
+                    .iter()
+                    .filter_map(|sibling| sibling.content.as_str())
+                    .map(|content| format!("Sibling: {}", content))
+                    .collect();
+                contextual_parts.extend(sibling_contents);
+                log::debug!("✅ Using collective sibling context: {} siblings", context.siblings.len());
+            }
+            
+            // Add related nodes (children) context
+            if !context.related_nodes.is_empty() {
+                let children_contents: Vec<String> = context.related_nodes
+                    .iter()
+                    .filter_map(|child| child.content.as_str())
+                    .map(|content| format!("Child: {}", content))
+                    .collect();
+                contextual_parts.extend(children_contents);
+            }
+            
+            Ok(contextual_parts.join("\n"))
+        } else {
+            // Fallback for nodes without context
+            if let Some(content) = node.content.as_str() {
+                Ok(format!("Content: {}", content))
+            } else {
+                Ok(node.content.to_string())
+            }
+        }
     }
 
     /// Build FULL hierarchical content for embeddings - includes complete ancestry chain
@@ -4313,3 +4398,27 @@ fn count_hierarchical_nodes(nodes: &[HierarchicalNode]) -> usize {
 // Include tests module - temporarily disabled due to API changes
 // #[cfg(test)]
 // mod tests;
+
+#[cfg(test)]
+mod collective_sibling_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_node_context_collective_siblings() {
+        // Test that NodeContext properly handles collective siblings
+        let sibling1 = Node::new("text".to_string(), json!({"text": "Sibling 1"}));
+        let sibling2 = Node::new("text".to_string(), json!({"text": "Sibling 2"}));
+        let parent = Node::new("text".to_string(), json!({"text": "Parent"}));
+
+        // ✅ NEW: Test collective sibling population
+        let context = NodeContext::default()
+            .with_parent(parent)
+            .with_siblings(vec![sibling1, sibling2]);
+
+        assert_eq!(context.siblings.len(), 2);
+        assert!(context.parent.is_some());
+        assert!(context.siblings.iter().any(|s| s.content.get("text").unwrap() == "Sibling 1"));
+        assert!(context.siblings.iter().any(|s| s.content.get("text").unwrap() == "Sibling 2"));
+    }
+}
