@@ -38,30 +38,23 @@ let context = NodeContext::default()
 let embedding = service.get_enhanced_contextual_embedding(&node).await?;
 ```
 
-## 🏗️ Architecture
+## Architecture Context
 
-NodeSpace Core Logic operates within a distributed contract architecture:
+Part of the NodeSpace system architecture:
 
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│ Data Store  │    │ NLP Engine  │    │ Workflow    │
-│ (LanceDB)   │    │ (Ollama)    │    │ Engine      │
-└──────┬──────┘    └──────┬──────┘    └──────┬──────┘
-       │                  │                  │
-       └──────────────────┼──────────────────┘
-                          │
-              ┌───────────▼──────────┐
-              │  NodeSpace Core      │
-              │  Logic               │
-              │  (Orchestration)     │
-              └──────────────────────┘
-```
+1. [nodespace-core-types](https://github.com/malibio/nodespace-core-types) - Shared data structures and interfaces
+2. [nodespace-data-store](https://github.com/malibio/nodespace-data-store) - LanceDB vector storage implementation
+3. [nodespace-nlp-engine](https://github.com/malibio/nodespace-nlp-engine) - AI/ML processing and LLM integration  
+4. [nodespace-workflow-engine](https://github.com/malibio/nodespace-workflow-engine) - Automation and event processing
+5. **[nodespace-core-logic](https://github.com/malibio/nodespace-core-logic)** ← **You are here**
+6. [nodespace-core-ui](https://github.com/malibio/nodespace-core-ui) - React components and UI
+7. [nodespace-desktop-app](https://github.com/malibio/nodespace-desktop-app) - Tauri application shell
 
 **Service Dependencies:**
-- **[nodespace-core-types](https://github.com/malibio/nodespace-core-types)** - Shared data structures and type definitions
-- **[nodespace-data-store](https://github.com/malibio/nodespace-data-store)** - LanceDB vector storage implementation (imports `DataStore` trait)
-- **[nodespace-nlp-engine](https://github.com/malibio/nodespace-nlp-engine)** - Ollama AI processing engine (imports `NLPEngine` trait)  
-- **[nodespace-workflow-engine](https://github.com/malibio/nodespace-workflow-engine)** - Event processing and automation (imports `WorkflowEngine` trait)
+- Imports `DataStore` trait from nodespace-data-store
+- Imports `NLPEngine` trait from nodespace-nlp-engine  
+- Imports `WorkflowEngine` trait from nodespace-workflow-engine
+- Uses shared types from nodespace-core-types
 
 ## 📦 Installation & Usage
 
@@ -174,14 +167,9 @@ let config = NLPConfig {
 };
 ```
 
-## 📚 Related Repositories
+## 📚 Related Documentation
 
-- **[nodespace-data-store](https://github.com/malibio/nodespace-data-store)** - LanceDB vector storage implementation
-- **[nodespace-nlp-engine](https://github.com/malibio/nodespace-nlp-engine)** - Ollama AI processing engine with multi-level embeddings
-- **[nodespace-workflow-engine](https://github.com/malibio/nodespace-workflow-engine)** - Event processing and automation
-- **[nodespace-core-types](https://github.com/malibio/nodespace-core-types)** - Shared data structures including NodeContext
-- **[nodespace-desktop-app](https://github.com/malibio/nodespace-desktop-app)** - Tauri desktop application
-- **[nodespace-core-ui](https://github.com/malibio/nodespace-core-ui)** - React component library
+For more details on the overall system architecture, see the complete NodeSpace ecosystem above in [Architecture Context](#architecture-context).
 
 ## 📋 API Reference
 
