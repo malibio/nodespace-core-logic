@@ -2,24 +2,24 @@
 
 **Business logic and service orchestration for NodeSpace**
 
-This repository implements the core business logic layer that orchestrates NodeSpace services, providing high-level operations and coordinating interactions between data storage, AI processing, and workflow automation.
+This repository implements the core business logic layer that orchestrates NodeSpace services, providing high-level operations and coordinating interactions between data storage and AI processing.
 
-## 🎯 Overview
+## Overview
 
 NodeSpace Core Logic serves as the central orchestration layer in the NodeSpace ecosystem, implementing sophisticated business workflows that bridge multiple specialized services. It provides a unified API for complex operations while maintaining clean separation of concerns across the distributed architecture.
 
-## 🚀 Key Features
+## Key Features
 
-- **🔄 RAG Pipeline Orchestration** - Complete text capture → embedding → search → response workflow
-- **🏗️ Service Coordination** - Seamless integration between data store, NLP engine, and workflow services  
-- **🧠 Enhanced Context Building** - Collective siblings approach for optimized multi-level embeddings
-- **📊 Hierarchical Data Management** - Efficient node creation, querying, and relationship management
-- **🖥️ Desktop Integration** - Enhanced APIs specifically designed for desktop application needs
-- **⚡ Smart Embedding Cache** - Multi-level caching with relationship tracking and dependency invalidation
+- **RAG Pipeline Orchestration** - Complete text capture → embedding → search → response workflow
+- **Service Coordination** - Seamless integration between data store and NLP engine  
+- **Enhanced Context Building** - Collective siblings approach for optimized multi-level embeddings
+- **Hierarchical Data Management** - Efficient node creation, querying, and relationship management
+- **Desktop Integration** - Enhanced APIs specifically designed for desktop application needs
+- **Smart Embedding Cache** - Multi-level caching with relationship tracking and dependency invalidation
 
-## 🆕 Recent Updates
+## Recent Updates
 
-### Collective Siblings Implementation ✅
+### Collective Siblings Implementation
 
 Updated context building to use collective siblings approach for enhanced AI embeddings:
 
@@ -29,7 +29,7 @@ Updated context building to use collective siblings approach for enhanced AI emb
 - **Future-ready architecture** - Prepared for advanced context strategies (Phi4Enhanced, Adaptive)
 
 ```rust
-// ✅ NEW: Collective sibling population
+// NEW: Collective sibling population
 let context = NodeContext::default()
     .with_parent(parent_node)
     .with_siblings(vec![sibling1, sibling2, sibling3]);
@@ -45,18 +45,16 @@ Part of the NodeSpace system architecture:
 1. [nodespace-core-types](https://github.com/malibio/nodespace-core-types) - Shared data structures and interfaces
 2. [nodespace-data-store](https://github.com/malibio/nodespace-data-store) - LanceDB vector storage implementation
 3. [nodespace-nlp-engine](https://github.com/malibio/nodespace-nlp-engine) - AI/ML processing and LLM integration  
-4. [nodespace-workflow-engine](https://github.com/malibio/nodespace-workflow-engine) - Automation and event processing
-5. **[nodespace-core-logic](https://github.com/malibio/nodespace-core-logic)** ← **You are here**
-6. [nodespace-core-ui](https://github.com/malibio/nodespace-core-ui) - React components and UI
-7. [nodespace-desktop-app](https://github.com/malibio/nodespace-desktop-app) - Tauri application shell
+4. **[nodespace-core-logic](https://github.com/malibio/nodespace-core-logic)** ← **You are here**
+5. [nodespace-core-ui](https://github.com/malibio/nodespace-core-ui) - React components and UI
+6. [nodespace-desktop-app](https://github.com/malibio/nodespace-desktop-app) - Tauri application shell
 
 **Service Dependencies:**
 - Imports `DataStore` trait from nodespace-data-store
 - Imports `NLPEngine` trait from nodespace-nlp-engine  
-- Imports `WorkflowEngine` trait from nodespace-workflow-engine
 - Uses shared types from nodespace-core-types
 
-## 📦 Installation & Usage
+## Installation & Usage
 
 Add to your `Cargo.toml`:
 
@@ -111,7 +109,7 @@ println!("Sources: {}", response.sources.len());
 println!("Confidence: {:.2}", response.overall_confidence);
 ```
 
-## 🧪 Development
+## Development
 
 ```bash
 # Check compilation and run linting
@@ -132,7 +130,7 @@ The repository includes:
 - **Unit tests** - Collective siblings implementation validation
 - **Desktop integration** - Enhanced query responses with rich metadata
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Test collective siblings implementation
@@ -142,7 +140,7 @@ cargo test collective_sibling_tests
 cargo test test_node_context_collective_siblings
 ```
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 - **Language**: Rust (2021 edition)
 - **Async Runtime**: Tokio
@@ -151,7 +149,7 @@ cargo test test_node_context_collective_siblings
 - **Error Handling**: Custom NodeSpaceError with comprehensive error types
 - **Logging**: Enhanced logging with debug info for context building
 
-## 🔧 Configuration
+## Configuration
 
 The service supports configurable context limits:
 
@@ -167,11 +165,11 @@ let config = NLPConfig {
 };
 ```
 
-## 📚 Related Documentation
+## Related Documentation
 
 For more details on the overall system architecture, see the complete NodeSpace ecosystem above in [Architecture Context](#architecture-context).
 
-## 📋 API Reference
+## API Reference
 
 ### Core Methods
 
